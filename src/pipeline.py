@@ -4,26 +4,18 @@
 import pandas as pd
 import os
 import warnings
-import importlib.util
 import joblib
 
 # Importar módulos locales
 from models.train import train_classification_model, train_regression_models
 from models.evaluate import print_classification_metrics, print_regression_metrics, print_residuals_analysis
 from models.visualize import plot_regression_analysis, plot_model_comparison, plot_predictions_comparison
+from data import clean as clean_module
+from features import make_features as features_module
 
-warnings.filterwarnings("ignore")
-
-# Cargar módulos de limpieza y features
-clean_path = os.path.abspath("../code/src/data/clean.py")
-spec = importlib.util.spec_from_file_location("clean", clean_path)
-clean_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(clean_module)
-
-features_path = os.path.abspath("../code/src/features/make_features.py")
-spec = importlib.util.spec_from_file_location("features", features_path)
-features_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(features_module)
+# Suprimir warnings específicos de sklearn y xgboost
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 def run_pipeline(orders_file='olist_orders_dataset.csv', save_models=True, output_dir='outputs/'):
     """Ejecuta el pipeline completo de ML.

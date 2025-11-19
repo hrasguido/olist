@@ -140,7 +140,7 @@ def generate_logistics_features(orders_df, order_items_df, products_df, sellers_
     logistics_features_df['is_heavy_order'] = (logistics_features_df['total_weight'] > weight_p75).astype(int)
     
     logistics_features_df = logistics_features_df.drop(columns=['total_price'])
-
+    
     return logistics_features_df
 
 

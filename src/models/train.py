@@ -86,7 +86,7 @@ def train_classification_model(X, y, test_size=0.2, random_state=42):
                 max_depth=6,
                 learning_rate=0.1,
                 scale_pos_weight=scale_pos_weight,
-                use_label_encoder=True,
+                use_label_encoder=False,
                 eval_metric='logloss',
                 random_state=random_state
             ))
