@@ -10,12 +10,14 @@ import joblib
 from models.train import train_classification_model, train_regression_models
 from models.evaluate import print_classification_metrics, print_regression_metrics, print_residuals_analysis
 from models.visualize import plot_regression_analysis, plot_model_comparison, plot_predictions_comparison
+from models.kpis import calculate_business_kpis
 from data import clean as clean_module
 from features import make_features as features_module
 
 # Suprimir warnings específicos de sklearn y xgboost
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
+
 
 def run_pipeline(orders_file='olist_orders_dataset.csv', save_models=True, output_dir='outputs/'):
     """Ejecuta el pipeline completo de ML.
@@ -87,21 +89,24 @@ def run_pipeline(orders_file='olist_orders_dataset.csv', save_models=True, outpu
     
     print(f"✅ Master DataFrame: {master_df.shape}")
 
-    # 4. Preparar datos
+    # 4. Calcular KPIs de Negocio
+    business_kpis = calculate_business_kpis(master_df, initial_master_df, output_dir)
+
+    # 5. Preparar datos
     X = master_df.drop(["is_late_delivery", "delay_days"], axis=1)
     y_classification = master_df["is_late_delivery"]
     y_regression = master_df["delay_days"]
     
-    # 5. Entrenar modelo de clasificación
+    # 6. Entrenar modelo de clasificación
     clf_results = train_classification_model(X, y_classification)
     print_classification_metrics(clf_results)
     
-    # 6. Entrenar modelos de regresión
+    # 7. Entrenar modelos de regresión
     reg_results = train_regression_models(X, y_regression)
     print_regression_metrics(reg_results)
     print_residuals_analysis(reg_results['y_test'], reg_results['y_pred_best'], reg_results['best_metrics']['model_name'])
     
-    # 7. Generar visualizaciones
+    # 8. Generar visualizaciones
     print("\n" + "="*60)
     print("GENERANDO VISUALIZACIONES")
     print("="*60)
@@ -114,7 +119,7 @@ def run_pipeline(orders_file='olist_orders_dataset.csv', save_models=True, outpu
     reg_results['results_df'].to_csv(os.path.join(output_dir, 'regression_results.csv'), index=False)
     print(f"✅ Resultados guardados en: {os.path.join(output_dir, 'regression_results.csv')}")
     
-    # 8. Guardar modelos
+    # 9. Guardar modelos
     if save_models:
         model_prefix = orders_file.replace('.csv', '')
         clf_path = f"models/{model_prefix}_classification.pkl"
@@ -136,7 +141,8 @@ def run_pipeline(orders_file='olist_orders_dataset.csv', save_models=True, outpu
     return {
         'classification': clf_results,
         'regression': reg_results,
-        'master_df': master_df
+        'master_df': master_df,
+        'business_kpis': business_kpis
     }
 
 
