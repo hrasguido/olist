@@ -1,7 +1,6 @@
 data/raw/*
 data/processed/*
 data/features/*
-models/*
 *.pkl
 *.csv
 .DS_Store
