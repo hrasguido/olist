@@ -1,0 +1,10 @@
+data/raw/*
+data/processed/*
+data/features/*
+models/*
+*.pkl
+*.csv
+.DS_Store
+__pycache__/
+outputs/*
+.venv/*
