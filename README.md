@@ -143,7 +143,7 @@ Una vez instaladas las dependencias y configurados los datos, ejecuta el pipelin
 
 ```bash
 # Asegúrate de estar en el directorio raíz del proyecto
-cd /Users/howard/Downloads/modulo13/sprint2/code
+cd ~/olist
 
 # Activar entorno virtual (si no está activado)
 source .venv/bin/activate
@@ -261,7 +261,7 @@ pip install -r requirements.txt
 ### Error: "ModuleNotFoundError: No module named 'src'"
 Asegúrate de ejecutar el script desde el directorio raíz del proyecto:
 ```bash
-cd /Users/howard/Downloads/modulo13/sprint2/code
+cd ~/olist
 python3.12 src/pipeline.py
 ```
 
