@@ -289,6 +289,6 @@ Para preguntas o problemas, consulta la documentación de cada módulo en el có
 
 ---
 
-**Versión**: 1.0  
+**Versión**: v2.2.0  
 **Python**: 3.12  
 **Última actualización**: Noviembre 2025
