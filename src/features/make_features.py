@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 from math import radians, sin, cos, sqrt, atan2
 from typing import Dict
-import umap
 import matplotlib.pyplot as plt
 import seaborn as sns
 
