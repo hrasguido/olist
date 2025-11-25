@@ -4,4 +4,4 @@ __pycache__
 *.log
 data/*.csv
 
-.venv/*
+.venv/
