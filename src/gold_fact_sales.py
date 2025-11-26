@@ -10,6 +10,9 @@ import os
 from dotenv import load_dotenv
 from typing import Dict
 
+from gold_features import generate_temporal_features
+
+
 load_dotenv("/workspace/.env")
 
 SILVER_CONN = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@db:5432/silver"
@@ -214,7 +217,33 @@ def save_master_table(master_df: pd.DataFrame, datasets: Dict[str, pd.DataFrame]
     
     # Guardar geolocation por separado (para cálculos de distancia)
     if 'geolocation' in datasets and not datasets['geolocation'].empty:
-        datasets['geolocation'].to_sql(
+        logger.info("   🗺️  Procesando geolocation (eliminando duplicados)...")
+        geo_df = datasets['geolocation'].copy()
+        
+        # Convertir zip code a numérico
+        geo_df['geolocation_zip_code_prefix'] = pd.to_numeric(
+            geo_df['geolocation_zip_code_prefix'], 
+            errors='coerce'
+        )
+        
+        # Eliminar duplicados agrupando por zip code y promediando coordenadas
+        geo_unique = geo_df.groupby('geolocation_zip_code_prefix').agg({
+            'geolocation_lat': 'mean',
+            'geolocation_lng': 'mean',
+            'geolocation_city': 'first',
+            'geolocation_state': 'first'
+        }).reset_index()
+        
+        initial_count = len(geo_df)
+        final_count = len(geo_unique)
+        duplicates_removed = initial_count - final_count
+        
+        logger.info(f"      • Registros iniciales: {initial_count:,}")
+        logger.info(f"      • Duplicados eliminados: {duplicates_removed:,}")
+        logger.info(f"      • Registros únicos: {final_count:,}")
+        
+        # Guardar geolocation sin duplicados
+        geo_unique.to_sql(
             'geolocation',
             engine_gold,
             schema='dm',
@@ -223,7 +252,7 @@ def save_master_table(master_df: pd.DataFrame, datasets: Dict[str, pd.DataFrame]
             method='multi',
             chunksize=5000
         )
-        logger.info(f"   ✅ Tabla 'gold.dm.geolocation' creada ({len(datasets['geolocation']):,} registros)")
+        logger.info(f"   ✅ Tabla 'gold.dm.geolocation' creada ({final_count:,} registros únicos)")
     
     return {
         "status": "success",
@@ -256,6 +285,24 @@ def silver_to_gold():
     
     # 3. Guardar en Gold
     result = save_master_table(master_df, datasets)
+
+    logger.info("🎯 Generando tabla de features...")
+    features_df = generate_temporal_features(master_df)
+    features_df.to_sql(
+        'features',
+        engine_gold,
+        schema='dm',
+        if_exists='replace',
+        index=False,
+        method='multi',
+        chunksize=5000
+    )
+    logger.info(f"   ✅ Features guardadas: {len(features_df):,} registros")
+
+
+
+
+
     
     logger.info("=" * 80)
     logger.info("✅ MASTER TABLE GOLD COMPLETADA")
