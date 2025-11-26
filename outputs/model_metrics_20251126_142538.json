@@ -1,0 +1,35 @@
+{
+  "xgboost_final": {
+    "train": {
+      "mae": 2.95749831199646,
+      "rmse": 3.968287643774134,
+      "r2": 0.6922800540924072
+    },
+    "test": {
+      "mae": 4.52879524230957,
+      "rmse": 6.144964883081647,
+      "r2": 0.2637607455253601
+    },
+    "n_features": 50,
+    "best_params": {
+      "n_estimators": 228,
+      "max_depth": 10,
+      "learning_rate": 0.015018996516367764,
+      "subsample": 0.7051934010394936,
+      "colsample_bytree": 0.6425535849037647,
+      "min_child_weight": 2,
+      "gamma": 0.334883534444727,
+      "reg_alpha": 0.2132942188919396,
+      "reg_lambda": 0.9302244501303449,
+      "random_state": 42,
+      "n_jobs": -1,
+      "verbosity": 0
+    }
+  },
+  "timestamp": "2025-11-26T14:25:38.959872",
+  "cross_validation": {
+    "best_model": "XGBoost",
+    "n_features": 50,
+    "n_samples": 9702
+  }
+}

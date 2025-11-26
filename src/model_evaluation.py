@@ -12,7 +12,13 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import xgboost as xgb
 import warnings
+import os
 warnings.filterwarnings('ignore')
+
+# Configurar carpeta de outputs (ruta relativa)
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs')
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
 
 
 @task(log_prints=True)
@@ -304,7 +310,7 @@ def print_comparison_table(results_df: pd.DataFrame):
 @task(log_prints=True)
 def save_comparison_results(
     results_df: pd.DataFrame,
-    output_path: str = '/workspace/model_comparison_results.csv'
+    output_path: str = None
 ):
     """
     Guarda los resultados de comparación en un archivo CSV.
@@ -314,6 +320,12 @@ def save_comparison_results(
         output_path: Ruta del archivo de salida
     """
     logger = get_run_logger()
+    
+    # Definir ruta por defecto con timestamp
+    if output_path is None:
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        output_path = os.path.join(OUTPUT_DIR, f'model_comparison_{timestamp}.csv')
+    
     logger.info(f"💾 Guardando resultados en: {output_path}")
     
     # Seleccionar columnas relevantes
@@ -332,6 +344,8 @@ def save_comparison_results(
     
     results_df[output_cols].to_csv(output_path, index=False)
     logger.info(f"   ✅ Resultados guardados exitosamente")
+    
+    return output_path
 
 
 @flow(name="Model Evaluation with Cross-Validation", log_prints=True)
@@ -369,16 +383,16 @@ def evaluate_models_with_cv(
     
     # 5. Guardar resultados (opcional)
     if save_results:
-        save_comparison_results(stats_results['results_df'])
+        comparison_path = save_comparison_results(stats_results['results_df'])
     
     return {
         'results_df': stats_results['results_df'],
         'best_model': stats_results['best_overall_model'],
         'statistics': stats_results,
         'n_features': len(feature_cols),
-        'n_samples': len(X)
+        'n_samples': len(X),
+        'comparison_path': comparison_path if save_results else None
     }
-
 
 if __name__ == "__main__":
     print("Modulo de evaluacion")

@@ -20,6 +20,8 @@ from optuna.samplers import TPESampler
 from model_evaluation import evaluate_models_with_cv
 import pickle
 from typing import List
+from business_kpis import calculate_business_kpis
+
 
 
 from gold_features import (
@@ -30,7 +32,13 @@ from gold_features import (
     combine_features
 )
 
-load_dotenv("/workspace/.env")
+# Cargar .env desde la raíz del proyecto
+env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+load_dotenv(env_path)
+
+# Configurar carpeta de outputs (ruta relativa)
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs')
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SILVER_CONN = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@db:5432/silver"
 GOLD_CONN   = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@db:5432/gold"
@@ -787,7 +795,7 @@ def save_model_pickle(
     model,
     model_metrics: Dict,
     feature_cols: List[str],
-    output_path: str = '/workspace/xgboost_model_final.pkl'
+    output_path: str = None
 ) -> Dict:
     """
     Guarda el modelo entrenado en formato pickle.
@@ -804,6 +812,11 @@ def save_model_pickle(
     logger = get_run_logger()
     logger.info("💾 Guardando modelo en formato pickle...")
     
+    # Definir ruta por defecto con timestamp
+    if output_path is None:
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        output_path = os.path.join(OUTPUT_DIR, f'xgboost_model_{timestamp}.pkl')
+    
     # Crear diccionario con modelo y metadata
     model_package = {
         'model': model,
@@ -818,7 +831,6 @@ def save_model_pickle(
         pickle.dump(model_package, f)
     
     # Verificar tamaño del archivo
-    import os
     file_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
     
     logger.info(f"   ✅ Modelo guardado exitosamente")
@@ -833,6 +845,94 @@ def save_model_pickle(
         'file_size_mb': file_size,
         'n_features': len(feature_cols)
     }
+
+@task(log_prints=True)
+def save_feature_importance(
+    model,
+    feature_cols: List[str],
+    output_path: str = None
+) -> str:
+    """
+    Guarda la importancia de features en CSV.
+    
+    Args:
+        model: Modelo entrenado
+        feature_cols: Lista de features
+        output_path: Ruta del archivo de salida
+    
+    Returns:
+        Ruta del archivo guardado
+    """
+    logger = get_run_logger()
+    logger.info("💾 Guardando feature importance...")
+    
+    # Definir ruta por defecto con timestamp
+    if output_path is None:
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        output_path = os.path.join(OUTPUT_DIR, f'feature_importance_{timestamp}.csv')
+    
+    # Crear DataFrame con importancias
+    feature_importance = pd.DataFrame({
+        'feature': feature_cols,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    # Guardar
+    feature_importance.to_csv(output_path, index=False)
+    
+    logger.info(f"   ✅ Feature importance guardado en: {output_path}")
+    logger.info(f"   📊 Top 5 features:")
+    for idx, row in feature_importance.head(5).iterrows():
+        logger.info(f"      {idx+1}. {row['feature']}: {row['importance']:.4f}")
+    
+    return output_path
+
+@task(log_prints=True)
+def save_model_metrics(
+    model_metrics: Dict,
+    cv_results: Dict = None,
+    output_path: str = None
+) -> str:
+    """
+    Guarda las métricas del modelo en JSON.
+    
+    Args:
+        model_metrics: Métricas del modelo final
+        cv_results: Resultados de cross-validation
+        output_path: Ruta del archivo de salida
+    
+    Returns:
+        Ruta del archivo guardado
+    """
+    logger = get_run_logger()
+    logger.info("💾 Guardando métricas del modelo...")
+    
+    # Definir ruta por defecto con timestamp
+    if output_path is None:
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        output_path = os.path.join(OUTPUT_DIR, f'model_metrics_{timestamp}.json')
+    
+    # Preparar datos para guardar
+    metrics_data = {
+        'xgboost_final': model_metrics,
+        'timestamp': pd.Timestamp.now().isoformat()
+    }
+    
+    if cv_results:
+        metrics_data['cross_validation'] = {
+            'best_model': cv_results['best_model'],
+            'n_features': cv_results['n_features'],
+            'n_samples': cv_results['n_samples']
+        }
+    
+    # Guardar en JSON
+    import json
+    with open(output_path, 'w') as f:
+        json.dump(metrics_data, f, indent=2)
+    
+    logger.info(f"   ✅ Métricas guardadas en: {output_path}")
+    
+    return output_path
 
 @task(log_prints=True)
 def save_master_table(master_df: pd.DataFrame, datasets: Dict[str, pd.DataFrame]) -> Dict:
@@ -971,15 +1071,49 @@ def silver_to_gold():
     # ============================================================
     logger.info("")
     logger.info("=" * 80)
-    logger.info("💾 GUARDANDO MODELO FINAL")
+    logger.info("💾 GUARDANDO MODELO Y RESULTADOS")
     logger.info("=" * 80)
     
+    # 1. Guardar modelo
     save_result = save_model_pickle(
         model=xgb_result['model'],
         model_metrics=model_metrics,
-        feature_cols=xgb_result['feature_cols'],
-        output_path='/workspace/xgboost_model_final.pkl'
+        feature_cols=xgb_result['feature_cols']
     )
+    
+    # 2. Guardar feature importance
+    feature_importance_path = save_feature_importance(
+        model=xgb_result['model'],
+        feature_cols=xgb_result['feature_cols']
+    )
+    
+    # 3. Guardar métricas completas
+    metrics_path = save_model_metrics(
+        model_metrics=model_metrics,
+        cv_results=cv_results
+    )
+    
+    # Resumen de archivos guardados
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📁 ARCHIVOS GUARDADOS EN OUTPUTS")
+    logger.info("=" * 80)
+    logger.info(f"   📦 Modelo: {save_result['output_path']}")
+    logger.info(f"      • Tamaño: {save_result['file_size_mb']:.2f} MB")
+    logger.info(f"   📊 Feature Importance: {feature_importance_path}")
+    logger.info(f"   📈 Métricas: {metrics_path}")
+    logger.info(f"   📋 Comparación CV: Ver carpeta outputs/")
+    logger.info("=" * 80)
+
+    # ============================================================
+    # CALCULAR KPIs DE NEGOCIO
+    # ============================================================
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📊 ANÁLISIS DE KPIs DE NEGOCIO")
+    logger.info("=" * 80)
+    
+    business_kpis = calculate_business_kpis(master_df)
     
     # 3. Guardar master_table en Gold (ahora con predicciones)
     result = save_master_table(master_df, datasets)
