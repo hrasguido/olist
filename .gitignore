@@ -8,3 +8,4 @@ data/*.csv
 *.csv
 *.pkl
 .DS_Store
+*.json
