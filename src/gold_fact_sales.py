@@ -21,6 +21,7 @@ from model_evaluation import evaluate_models_with_cv
 import pickle
 from typing import List
 from business_kpis import calculate_business_kpis
+from visualization import generate_all_visualizations
 
 
 
@@ -1104,6 +1105,29 @@ def silver_to_gold():
     logger.info(f"   📈 Métricas: {metrics_path}")
     logger.info(f"   📋 Comparación CV: Ver carpeta outputs/")
     logger.info("=" * 80)
+
+    # Resumen de archivos guardados
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📁 ARCHIVOS GUARDADOS EN OUTPUTS")
+    logger.info("=" * 80)
+    logger.info(f"   📦 Modelo: {save_result['output_path']}")
+    logger.info(f"      • Tamaño: {save_result['file_size_mb']:.2f} MB")
+    logger.info(f"   📊 Feature Importance: {feature_importance_path}")
+    logger.info(f"   📈 Métricas: {metrics_path}")
+    logger.info(f"   📋 Comparación CV: Ver carpeta outputs/")
+    logger.info("=" * 80)
+    
+    # ============================================================
+    # GENERAR VISUALIZACIONES
+    # ============================================================
+    viz_paths = generate_all_visualizations(
+        master_df=master_df,
+        model=xgb_result['model'],
+        feature_cols=xgb_result['feature_cols'],
+        model_metrics=model_metrics,
+        cv_results=cv_results
+    )
 
     # ============================================================
     # CALCULAR KPIs DE NEGOCIO
