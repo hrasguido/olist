@@ -679,7 +679,28 @@ def combine_features(
         # Manejar NaN en same_state
         combined_df.loc[combined_df['same_state'].isna(), 'is_interstate'] = np.nan
     
-    logger.info(f"   ✅ Features combinadas: {len(combined_df):,} registros, {len(combined_df.columns)} columnas")
+        logger.info(f"   ✅ Features combinadas: {len(combined_df):,} registros, {len(combined_df.columns)} columnas")
+    
+    # ============================================================
+    # VERIFICAR Y ELIMINAR DUPLICADOS POR ORDER_ID
+    # ============================================================
+    logger.info("   🧹 Verificando duplicados...")
+    initial_count = len(combined_df)
+    
+    if 'order_id' in combined_df.columns:
+        duplicates_count = combined_df.duplicated(subset=['order_id'], keep='first').sum()
+        
+        if duplicates_count > 0:
+            logger.warning(f"      ⚠️  Duplicados detectados: {duplicates_count:,} registros")
+            logger.info(f"      • Causa: Merges múltiples entre features")
+            
+            # Eliminar duplicados manteniendo el primer registro
+            combined_df = combined_df.drop_duplicates(subset=['order_id'], keep='first')
+            
+            logger.info(f"      ✅ Duplicados eliminados: {initial_count - len(combined_df):,}")
+            logger.info(f"      📊 Registros únicos finales: {len(combined_df):,}")
+        else:
+            logger.info(f"      ✅ No se detectaron duplicados en order_id")
     
     return combined_df
 

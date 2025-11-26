@@ -6,12 +6,29 @@ Carga tablas desde Silver y construye master table con todos los datos
 from prefect import flow, task, get_run_logger
 from sqlalchemy import create_engine
 import pandas as pd
+import numpy as np
 import os
 from dotenv import load_dotenv
 from typing import Dict
+from sklearn.feature_selection import mutual_info_regression, f_regression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import xgboost as xgb
+import optuna
+from optuna.samplers import TPESampler
+from model_evaluation import evaluate_models_with_cv
+import pickle
+from typing import List
 
-from gold_features import generate_temporal_features
 
+from gold_features import (
+    generate_temporal_features,
+    generate_logistics_features,
+    generate_payment_features,
+    generate_customer_features,
+    combine_features
+)
 
 load_dotenv("/workspace/.env")
 
@@ -150,6 +167,30 @@ def build_master_table(datasets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     # Nota: geolocation se puede usar después para calcular distancias
     # pero no se hace join directo porque tiene múltiples registros por zip
     
+        # Nota: geolocation se puede usar después para calcular distancias
+    # pero no se hace join directo porque tiene múltiples registros por zip
+    
+    # ============================================================
+    # ELIMINAR DUPLICADOS POR ORDER_ID
+    # ============================================================
+    logger.info("   🧹 Verificando duplicados...")
+    initial_count = len(master)
+    
+    # Contar duplicados por order_id
+    duplicates_count = master.duplicated(subset=['order_id'], keep='first').sum()
+    
+    if duplicates_count > 0:
+        logger.warning(f"      ⚠️  Duplicados detectados: {duplicates_count:,} registros")
+        logger.info(f"      • Causa: Órdenes con múltiples items/pagos/reviews")
+        
+        # Eliminar duplicados manteniendo el primer registro
+        master = master.drop_duplicates(subset=['order_id'], keep='first')
+        
+        logger.info(f"      ✅ Duplicados eliminados: {initial_count - len(master):,}")
+        logger.info(f"      📊 Registros únicos finales: {len(master):,}")
+    else:
+        logger.info(f"      ✅ No se detectaron duplicados en order_id")
+    
     # ============================================================
     # CALCULAR TARGET: Delayed_time
     # ============================================================
@@ -194,6 +235,604 @@ def build_master_table(datasets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     
     return master
 
+@task(log_prints=True)
+def apply_one_hot_encoding(master_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aplica One-Hot Encoding a las columnas categóricas de la master table.
+    """
+    logger = get_run_logger()
+    logger.info("🔢 Aplicando One-Hot Encoding a columnas categóricas...")
+    
+    initial_columns = len(master_df.columns)
+    
+    # Definir columnas categóricas para One-Hot Encoding
+    categorical_columns = []
+    
+    # 1. Order status (si existe y no fue filtrado)
+    if 'order_status' in master_df.columns:
+        categorical_columns.append('order_status')
+    
+    # 2. Product category
+    if 'product_category_name' in master_df.columns:
+        categorical_columns.append('product_category_name')
+    
+    # 3. Payment type
+    if 'payment_type' in master_df.columns:
+        categorical_columns.append('payment_type')
+    
+    # 4. Customer state
+    if 'customer_state' in master_df.columns:
+        categorical_columns.append('customer_state')
+    
+    # 5. Seller state
+    if 'seller_state' in master_df.columns:
+        categorical_columns.append('seller_state')
+    
+    # 6. Customer city (CUIDADO: puede tener muchas categorías)
+    # Solo si tiene menos de 50 valores únicos
+    if 'customer_city' in master_df.columns:
+        unique_cities = master_df['customer_city'].nunique()
+        if unique_cities <= 50:
+            categorical_columns.append('customer_city')
+        else:
+            logger.info(f"   ⚠️  customer_city tiene {unique_cities} valores únicos, se omite del encoding")
+    
+    # 7. Seller city (CUIDADO: puede tener muchas categorías)
+    if 'seller_city' in master_df.columns:
+        unique_seller_cities = master_df['seller_city'].nunique()
+        if unique_seller_cities <= 50:
+            categorical_columns.append('seller_city')
+        else:
+            logger.info(f"   ⚠️  seller_city tiene {unique_seller_cities} valores únicos, se omite del encoding")
+    
+    # Filtrar solo las columnas que existen
+    categorical_columns = [col for col in categorical_columns if col in master_df.columns]
+    
+    if not categorical_columns:
+        logger.info("   ℹ️  No se encontraron columnas categóricas para encoding")
+        return master_df
+    
+    logger.info(f"   📋 Columnas a encodear: {categorical_columns}")
+    
+    # Aplicar One-Hot Encoding
+    for col in categorical_columns:
+        # Contar valores únicos
+        unique_values = master_df[col].nunique()
+        logger.info(f"      • {col}: {unique_values} categorías únicas")
+        
+        # Crear dummies
+        dummies = pd.get_dummies(
+            master_df[col], 
+            prefix=col,
+            drop_first=True,  # Evitar multicolinealidad
+            dtype=int
+        )
+        
+        # Agregar al dataframe
+        master_df = pd.concat([master_df, dummies], axis=1)
+        
+        # Eliminar columna original
+        master_df = master_df.drop(columns=[col])
+        
+        logger.info(f"         ✅ Creadas {len(dummies.columns)} columnas dummy")
+    
+    final_columns = len(master_df.columns)
+    new_columns = final_columns - initial_columns
+    
+    logger.info(f"   ✅ One-Hot Encoding completado")
+    logger.info(f"      • Columnas iniciales: {initial_columns}")
+    logger.info(f"      • Columnas finales: {final_columns}")
+    logger.info(f"      • Nuevas columnas: {new_columns}")
+    
+    return master_df
+
+@task(log_prints=True)
+def feature_selection(master_df: pd.DataFrame, target_col: str = 'Delayed_time', 
+                     correlation_threshold: float = 0.05,
+                     top_n_features: int = 50) -> pd.DataFrame:
+    """
+    Reduce variables mediante Feature Selection basado en el target.
+    
+    Métodos utilizados:
+    1. Correlación de Pearson con el target
+    2. Mutual Information
+    3. Feature Importance de Random Forest
+    
+    Args:
+        master_df: DataFrame con todas las features
+        target_col: Nombre de la columna target
+        correlation_threshold: Umbral mínimo de correlación absoluta
+        top_n_features: Número máximo de features a mantener
+    
+    Returns:
+        DataFrame con features seleccionadas + target + IDs
+    """
+    logger = get_run_logger()
+    logger.info("🎯 Aplicando Feature Selection...")
+    
+    if target_col not in master_df.columns:
+        logger.warning(f"   ⚠️  Target '{target_col}' no encontrado, se omite feature selection")
+        return master_df
+    
+    # Separar columnas
+    id_columns = [col for col in master_df.columns if 'id' in col.lower()]
+    date_columns = [col for col in master_df.columns if master_df[col].dtype == 'datetime64[ns]']
+    
+    # Columnas numéricas (excluyendo IDs, fechas y target)
+    numeric_cols = master_df.select_dtypes(include=[np.number]).columns.tolist()
+    feature_cols = [col for col in numeric_cols 
+                   if col != target_col 
+                   and col not in id_columns]
+    
+    logger.info(f"   📊 Análisis inicial:")
+    logger.info(f"      • Total columnas: {len(master_df.columns)}")
+    logger.info(f"      • Columnas numéricas: {len(numeric_cols)}")
+    logger.info(f"      • Features candidatas: {len(feature_cols)}")
+    logger.info(f"      • IDs: {len(id_columns)}")
+    logger.info(f"      • Fechas: {len(date_columns)}")
+    
+    if len(feature_cols) == 0:
+        logger.warning("   ⚠️  No hay features numéricas para seleccionar")
+        return master_df
+    
+    # Preparar datos (eliminar NaN)
+    X = master_df[feature_cols].fillna(0)
+    y = master_df[target_col].fillna(0)
+    
+    # ============================================================
+    # MÉTODO 1: Correlación de Pearson
+    # ============================================================
+    logger.info("   📈 Método 1: Correlación de Pearson...")
+    correlations = {}
+    for col in feature_cols:
+        corr = X[col].corr(y)
+        correlations[col] = abs(corr)
+    
+    corr_df = pd.DataFrame.from_dict(correlations, orient='index', columns=['correlation'])
+    corr_df = corr_df.sort_values('correlation', ascending=False)
+    
+    # Features con correlación significativa
+    significant_corr = corr_df[corr_df['correlation'] >= correlation_threshold].index.tolist()
+    logger.info(f"      • Features con |corr| >= {correlation_threshold}: {len(significant_corr)}")
+    
+    # ============================================================
+    # MÉTODO 2: Mutual Information
+    # ============================================================
+    logger.info("   🔗 Método 2: Mutual Information...")
+    mi_scores = mutual_info_regression(X, y, random_state=42)
+    mi_df = pd.DataFrame({'feature': feature_cols, 'mi_score': mi_scores})
+    mi_df = mi_df.sort_values('mi_score', ascending=False)
+    
+    # Top features por MI
+    top_mi = mi_df.head(top_n_features)['feature'].tolist()
+    logger.info(f"      • Top {min(top_n_features, len(feature_cols))} features por MI")
+    
+    # ============================================================
+    # MÉTODO 3: Random Forest Feature Importance
+    # ============================================================
+    logger.info("   🌲 Método 3: Random Forest Feature Importance...")
+    
+    # Entrenar RF rápido (pocos árboles para velocidad)
+    rf = RandomForestRegressor(
+        n_estimators=50,
+        max_depth=10,
+        random_state=42,
+        n_jobs=-1
+    )
+    rf.fit(X, y)
+    
+    # Obtener importancias
+    importances = rf.feature_importances_
+    rf_df = pd.DataFrame({'feature': feature_cols, 'importance': importances})
+    rf_df = rf_df.sort_values('importance', ascending=False)
+    
+    # Top features por RF
+    top_rf = rf_df.head(top_n_features)['feature'].tolist()
+    logger.info(f"      • Top {min(top_n_features, len(feature_cols))} features por RF")
+    
+    # ============================================================
+    # COMBINAR MÉTODOS
+    # ============================================================
+    logger.info("   🔀 Combinando métodos...")
+    
+    # Unión de features seleccionadas por los 3 métodos
+    selected_features = list(set(significant_corr) | set(top_mi) | set(top_rf))
+    
+    # Limitar al top_n si es necesario
+    if len(selected_features) > top_n_features:
+        # Ordenar por promedio de rankings
+        feature_scores = {}
+        for feat in selected_features:
+            corr_rank = list(corr_df.index).index(feat) if feat in corr_df.index else len(feature_cols)
+            mi_rank = list(mi_df['feature']).index(feat) if feat in mi_df['feature'].values else len(feature_cols)
+            rf_rank = list(rf_df['feature']).index(feat) if feat in rf_df['feature'].values else len(feature_cols)
+            feature_scores[feat] = (corr_rank + mi_rank + rf_rank) / 3
+        
+        # Ordenar por score promedio
+        sorted_features = sorted(feature_scores.items(), key=lambda x: x[1])
+        selected_features = [f[0] for f in sorted_features[:top_n_features]]
+    
+    logger.info(f"   ✅ Features seleccionadas: {len(selected_features)}")
+    
+    # ============================================================
+    # CREAR DATAFRAME REDUCIDO
+    # ============================================================
+    # Mantener: IDs + features seleccionadas + target + fechas importantes
+    important_dates = ['order_purchase_timestamp', 'order_delivered_customer_date', 
+                      'order_estimated_delivery_date']
+    keep_dates = [col for col in important_dates if col in master_df.columns]
+    
+    final_columns = id_columns + selected_features + [target_col] + keep_dates
+    final_columns = [col for col in final_columns if col in master_df.columns]
+    
+    reduced_df = master_df[final_columns].copy()
+    
+    # ============================================================
+    # RESUMEN
+    # ============================================================
+    logger.info("")
+    logger.info("   📊 Resumen de Feature Selection:")
+    logger.info(f"      • Columnas originales: {len(master_df.columns)}")
+    logger.info(f"      • Columnas finales: {len(reduced_df.columns)}")
+    logger.info(f"      • Reducción: {len(master_df.columns) - len(reduced_df.columns)} columnas ({(1 - len(reduced_df.columns)/len(master_df.columns))*100:.1f}%)")
+    logger.info("")
+    logger.info("   🏆 Top 10 features por importancia combinada:")
+    for i, feat in enumerate(selected_features[:10], 1):
+        corr_val = correlations.get(feat, 0)
+        logger.info(f"      {i}. {feat} (corr: {corr_val:.3f})")
+    
+    return reduced_df
+
+@task(log_prints=True)
+def optimize_xgboost_hyperparameters(
+    X_train: pd.DataFrame, 
+    y_train: pd.Series, 
+    X_val: pd.DataFrame, 
+    y_val: pd.Series,
+    n_trials: int = 50
+) -> Dict:
+    """
+    Optimiza hiperparámetros de XGBoost usando Optuna.
+    
+    Args:
+        X_train: Features de entrenamiento
+        y_train: Target de entrenamiento
+        X_val: Features de validación
+        y_val: Target de validación
+        n_trials: Número de trials de Optuna
+    
+    Returns:
+        Dict con mejores hiperparámetros
+    """
+    logger = get_run_logger()
+    logger.info(f"🔍 Optimizando hiperparámetros con Optuna ({n_trials} trials)...")
+    
+    def objective(trial):
+        """Función objetivo para Optuna."""
+        # Definir espacio de búsqueda de hiperparámetros
+        params = {
+            'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+            'gamma': trial.suggest_float('gamma', 0.0, 0.5),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'random_state': 42,
+            'n_jobs': -1,
+            'verbosity': 0
+        }
+        
+        # Entrenar modelo con estos hiperparámetros
+        model = xgb.XGBRegressor(**params)
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            verbose=False
+        )
+        
+        # Predecir en validación
+        y_pred = model.predict(X_val)
+        
+        # Calcular MAE (métrica a minimizar)
+        mae = mean_absolute_error(y_val, y_pred)
+        
+        return mae
+    
+    # Crear estudio de Optuna
+    study = optuna.create_study(
+        direction='minimize',  # Minimizar MAE
+        sampler=TPESampler(seed=42),
+        study_name='xgboost_optimization'
+    )
+    
+    # Ejecutar optimización
+    study.optimize(
+        objective, 
+        n_trials=n_trials,
+        show_progress_bar=False,
+        n_jobs=1  # Usar 1 job porque XGBoost ya usa todos los cores
+    )
+    
+    # Mejores hiperparámetros
+    best_params = study.best_params
+    best_mae = study.best_value
+    
+    logger.info("")
+    logger.info("   ✅ Optimización completada")
+    logger.info(f"      • Mejor MAE: {best_mae:.4f} días")
+    logger.info(f"      • Trials completados: {len(study.trials)}")
+    logger.info("")
+    logger.info("   🏆 Mejores hiperparámetros:")
+    for param, value in best_params.items():
+        logger.info(f"      • {param}: {value}")
+    
+    return {
+        'best_params': best_params,
+        'best_mae': best_mae,
+        'study': study
+    }
+
+@task(log_prints=True)
+def train_xgboost_model(
+    master_df: pd.DataFrame, 
+    target_col: str = 'Delayed_time',
+    use_optuna: bool = True,
+    n_trials: int = 50
+) -> Dict:
+    """
+    Entrena un modelo XGBoost Regressor para predecir el target.
+    Opcionalmente usa Optuna para optimizar hiperparámetros.
+    
+    Args:
+        master_df: DataFrame con features y target
+        target_col: Nombre de la columna target
+        use_optuna: Si True, usa Optuna para optimizar hiperparámetros
+        n_trials: Número de trials de Optuna
+    
+    Returns:
+        Dict con master_df actualizado y métricas del modelo
+    """
+    logger = get_run_logger()
+    logger.info("🤖 Entrenando modelo XGBoost Regressor...")
+    
+    if target_col not in master_df.columns:
+        logger.warning(f"   ⚠️  Target '{target_col}' no encontrado, se omite entrenamiento")
+        return {'master_df': master_df, 'metrics': None}
+    
+    # ============================================================
+    # PREPARAR DATOS
+    # ============================================================
+    logger.info("   📊 Preparando datos...")
+    
+    # Identificar columnas
+    id_columns = [col for col in master_df.columns if 'id' in col.lower()]
+    date_columns = [col for col in master_df.columns if master_df[col].dtype == 'datetime64[ns]']
+    
+    # Features numéricas (excluyendo IDs, fechas y target)
+    numeric_cols = master_df.select_dtypes(include=[np.number]).columns.tolist()
+    feature_cols = [col for col in numeric_cols 
+                   if col != target_col 
+                   and col not in id_columns]
+    
+    logger.info(f"      • Features para entrenamiento: {len(feature_cols)}")
+    logger.info(f"      • Registros totales: {len(master_df):,}")
+    
+    # Preparar X e y
+    X = master_df[feature_cols].fillna(0)
+    y = master_df[target_col].fillna(0)
+    
+    # Verificar que hay datos suficientes
+    if len(X) < 100:
+        logger.warning(f"   ⚠️  Datos insuficientes para entrenamiento ({len(X)} registros)")
+        return {'master_df': master_df, 'metrics': None}
+    
+    # ============================================================
+    # SPLIT TRAIN/VALIDATION/TEST
+    # ============================================================
+    logger.info("   ✂️  Dividiendo datos (60% train, 20% val, 20% test)...")
+    
+    # Primero: train+val (80%) vs test (20%)
+    X_temp, X_test, y_temp, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    # Segundo: train (75% de 80% = 60%) vs val (25% de 80% = 20%)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_temp, y_temp, test_size=0.25, random_state=42
+    )
+    
+    logger.info(f"      • Train: {len(X_train):,} registros")
+    logger.info(f"      • Validation: {len(X_val):,} registros")
+    logger.info(f"      • Test: {len(X_test):,} registros")
+    
+    # ============================================================
+    # OPTIMIZACIÓN DE HIPERPARÁMETROS CON OPTUNA
+    # ============================================================
+    if use_optuna:
+        optuna_result = optimize_xgboost_hyperparameters(
+            X_train, y_train, 
+            X_val, y_val,
+            n_trials=n_trials
+        )
+        best_params = optuna_result['best_params']
+        best_params['random_state'] = 42
+        best_params['n_jobs'] = -1
+        best_params['verbosity'] = 0
+    else:
+        # Hiperparámetros por defecto
+        logger.info("   ⚙️  Usando hiperparámetros por defecto...")
+        best_params = {
+            'n_estimators': 100,
+            'max_depth': 6,
+            'learning_rate': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'random_state': 42,
+            'n_jobs': -1,
+            'verbosity': 0
+        }
+    
+    # ============================================================
+    # ENTRENAR MODELO FINAL
+    # ============================================================
+    logger.info("")
+    logger.info("   🚀 Entrenando modelo final con mejores hiperparámetros...")
+    
+    model = xgb.XGBRegressor(**best_params)
+    
+    # Entrenar con train + validation
+    X_train_full = pd.concat([X_train, X_val])
+    y_train_full = pd.concat([y_train, y_val])
+    
+    model.fit(
+        X_train_full, y_train_full,
+        eval_set=[(X_test, y_test)],
+        verbose=False
+    )
+    
+    logger.info(f"      ✅ Modelo entrenado")
+    
+    # ============================================================
+    # EVALUAR MODELO
+    # ============================================================
+    logger.info("")
+    logger.info("   📈 Evaluando modelo...")
+    
+    # Predicciones
+    y_train_pred = model.predict(X_train_full)
+    y_test_pred = model.predict(X_test)
+    
+    # Métricas en train
+    train_mae = mean_absolute_error(y_train_full, y_train_pred)
+    train_rmse = np.sqrt(mean_squared_error(y_train_full, y_train_pred))
+    train_r2 = r2_score(y_train_full, y_train_pred)
+    
+    # Métricas en test
+    test_mae = mean_absolute_error(y_test, y_test_pred)
+    test_rmse = np.sqrt(mean_squared_error(y_test, y_test_pred))
+    test_r2 = r2_score(y_test, y_test_pred)
+    
+    logger.info("")
+    logger.info("   📊 Métricas del Modelo:")
+    logger.info("      TRAIN:")
+    logger.info(f"         • MAE:  {train_mae:.2f} días")
+    logger.info(f"         • RMSE: {train_rmse:.2f} días")
+    logger.info(f"         • R²:   {train_r2:.4f}")
+    logger.info("      TEST:")
+    logger.info(f"         • MAE:  {test_mae:.2f} días")
+    logger.info(f"         • RMSE: {test_rmse:.2f} días")
+    logger.info(f"         • R²:   {test_r2:.4f}")
+    
+    # ============================================================
+    # GENERAR PREDICCIONES PARA TODO EL DATASET
+    # ============================================================
+    logger.info("")
+    logger.info("   🔮 Generando predicciones para todo el dataset...")
+    
+    predictions = model.predict(X)
+    master_df['Delayed_time_predicted'] = predictions
+    
+    # Calcular error de predicción
+    master_df['prediction_error'] = master_df[target_col] - master_df['Delayed_time_predicted']
+    master_df['prediction_error_abs'] = abs(master_df['prediction_error'])
+    
+    logger.info(f"      ✅ Predicciones agregadas como 'Delayed_time_predicted'")
+    logger.info(f"      • Error promedio: {master_df['prediction_error_abs'].mean():.2f} días")
+    logger.info(f"      • Error mediano: {master_df['prediction_error_abs'].median():.2f} días")
+    
+    # ============================================================
+    # FEATURE IMPORTANCE
+    # ============================================================
+    logger.info("")
+    logger.info("   🏆 Top 10 Features más importantes:")
+    
+    feature_importance = pd.DataFrame({
+        'feature': feature_cols,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    for i, row in feature_importance.head(10).iterrows():
+        logger.info(f"      {i+1}. {row['feature']}: {row['importance']:.4f}")
+    
+    # ============================================================
+    # RETORNAR RESULTADOS
+    # ============================================================
+    metrics = {
+        'train': {
+            'mae': float(train_mae),
+            'rmse': float(train_rmse),
+            'r2': float(train_r2)
+        },
+        'test': {
+            'mae': float(test_mae),
+            'rmse': float(test_rmse),
+            'r2': float(test_r2)
+        },
+        'n_features': len(feature_cols),
+        'best_params': best_params if use_optuna else None
+    }
+    
+    return {
+        'master_df': master_df,
+        'metrics': metrics,
+        'model': model,
+        'feature_cols': feature_cols
+    }
+
+@task(log_prints=True)
+def save_model_pickle(
+    model,
+    model_metrics: Dict,
+    feature_cols: List[str],
+    output_path: str = '/workspace/xgboost_model_final.pkl'
+) -> Dict:
+    """
+    Guarda el modelo entrenado en formato pickle.
+    
+    Args:
+        model: Modelo entrenado
+        model_metrics: Métricas del modelo
+        feature_cols: Lista de features utilizadas
+        output_path: Ruta donde guardar el modelo
+    
+    Returns:
+        Dict con información del guardado
+    """
+    logger = get_run_logger()
+    logger.info("💾 Guardando modelo en formato pickle...")
+    
+    # Crear diccionario con modelo y metadata
+    model_package = {
+        'model': model,
+        'metrics': model_metrics,
+        'feature_columns': feature_cols,
+        'model_type': type(model).__name__,
+        'timestamp': pd.Timestamp.now().isoformat()
+    }
+    
+    # Guardar en pickle
+    with open(output_path, 'wb') as f:
+        pickle.dump(model_package, f)
+    
+    # Verificar tamaño del archivo
+    import os
+    file_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
+    
+    logger.info(f"   ✅ Modelo guardado exitosamente")
+    logger.info(f"   📁 Ruta: {output_path}")
+    logger.info(f"   📊 Tamaño: {file_size:.2f} MB")
+    logger.info(f"   🎯 Features: {len(feature_cols)}")
+    logger.info(f"   📈 Test MAE: {model_metrics['test']['mae']:.3f} días")
+    logger.info(f"   📈 Test R²: {model_metrics['test']['r2']:.4f}")
+    
+    return {
+        'output_path': output_path,
+        'file_size_mb': file_size,
+        'n_features': len(feature_cols)
+    }
 
 @task(log_prints=True)
 def save_master_table(master_df: pd.DataFrame, datasets: Dict[str, pd.DataFrame]) -> Dict:
@@ -266,28 +905,115 @@ def save_master_table(master_df: pd.DataFrame, datasets: Dict[str, pd.DataFrame]
     }
 
 
-@flow(name="Silver → Gold (Master Table)", log_prints=True)
+@flow(name="Silver → Gold (Master Table + Features)", log_prints=True)
 def silver_to_gold():
     """
-    Flujo que construye la master table en Gold
+    Flujo que construye la master table y features completas en Gold
     desde todas las tablas de Silver
     """
     logger = get_run_logger()
     logger.info("=" * 80)
-    logger.info("🥇 INICIANDO CONSTRUCCIÓN DE MASTER TABLE - GOLD")
+    logger.info("🥇 INICIANDO CONSTRUCCIÓN DE MASTER TABLE + FEATURES - GOLD")
     logger.info("=" * 80)
     
     # 1. Cargar datasets desde Silver
     datasets = load_datasets_from_silver()
     
-    # 2. Construir master table
+    # 2. Construir master table base
     master_df = build_master_table(datasets)
     
-    # 3. Guardar en Gold
-    result = save_master_table(master_df, datasets)
+    # 2.5. Aplicar One-Hot Encoding
+    master_df = apply_one_hot_encoding(master_df)
+    
+        # 2.6. Feature Selection (reducir variables)
+    master_df = feature_selection(
+        master_df, 
+        target_col='Delayed_time',
+        correlation_threshold=0.05,
+        top_n_features=50
+    )
 
-    logger.info("🎯 Generando tabla de features...")
-    features_df = generate_temporal_features(master_df)
+    # ============================================================
+    # EVALUACIÓN CON VALIDACIÓN CRUZADA
+    # ============================================================
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("🔬 EVALUACIÓN DE MODELOS CON VALIDACIÓN CRUZADA")
+    logger.info("=" * 80)
+    
+    # Evaluar múltiples modelos con CV
+    cv_results = evaluate_models_with_cv(
+        master_df,
+        target_col='Delayed_time',
+        cv_folds=5,
+        save_results=True
+    )
+    
+    best_model_name = cv_results['best_model']
+    logger.info(f"")
+    logger.info(f"🏆 Mejor modelo identificado: {best_model_name}")
+    logger.info(f"   • Test MAE promedio: {cv_results['results_df'].iloc[0]['test_mae_mean']:.3f} días")
+    logger.info(f"   • Features utilizadas: {cv_results['n_features']}")
+    logger.info(f"")
+    
+    # 2.7. Entrenar modelo XGBoost con Optuna y generar predicciones
+    xgb_result = train_xgboost_model(
+        master_df, 
+        target_col='Delayed_time',
+        use_optuna=True,  # Activar optimización con Optuna
+        n_trials=50  # Número de trials (ajustable: 30-100)
+    )
+    master_df = xgb_result['master_df']
+    model_metrics = xgb_result['metrics']
+
+    # ============================================================
+    # GUARDAR MODELO EN PICKLE
+    # ============================================================
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("💾 GUARDANDO MODELO FINAL")
+    logger.info("=" * 80)
+    
+    save_result = save_model_pickle(
+        model=xgb_result['model'],
+        model_metrics=model_metrics,
+        feature_cols=xgb_result['feature_cols'],
+        output_path='/workspace/xgboost_model_final.pkl'
+    )
+    
+    # 3. Guardar master_table en Gold (ahora con predicciones)
+    result = save_master_table(master_df, datasets)
+    
+    # ============================================================
+    # GENERAR FEATURES COMPLETAS
+    # ============================================================
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("🎯 GENERANDO FEATURES COMPLETAS")
+    logger.info("=" * 80)
+    
+    # 4. Generar features temporales
+    logger.info("📅 Generando features temporales...")
+    temporal_df = generate_temporal_features(master_df)
+    
+    # 5. Generar features logísticas
+    logger.info("📦 Generando features logísticas...")
+    logistics_df = generate_logistics_features(datasets)
+    
+    # 6. Generar features de pago
+    logger.info("💳 Generando features de pago...")
+    payment_df = generate_payment_features(datasets)
+    
+    # 7. Generar features de cliente
+    logger.info("👥 Generando features de cliente...")
+    customer_df = generate_customer_features(datasets)
+    
+    # 8. Combinar todas las features
+    logger.info("🔗 Combinando todas las features...")
+    features_df = combine_features(temporal_df, logistics_df, payment_df, customer_df)
+    
+    # 9. Guardar features completas en Gold
+    logger.info("💾 Guardando features completas...")
     features_df.to_sql(
         'features',
         engine_gold,
@@ -297,25 +1023,49 @@ def silver_to_gold():
         method='multi',
         chunksize=5000
     )
-    logger.info(f"   ✅ Features guardadas: {len(features_df):,} registros")
-
-
-
-
-
+    logger.info(f"   ✅ Tabla 'gold.dm.features' creada")
+    logger.info(f"   📊 {len(features_df):,} registros, {len(features_df.columns)} columnas")
     
+    # ============================================================
+    # RESUMEN FINAL
+    # ============================================================
+    logger.info("")
     logger.info("=" * 80)
-    logger.info("✅ MASTER TABLE GOLD COMPLETADA")
+    logger.info("✅ GOLD LAYER COMPLETADO")
     logger.info("=" * 80)
     logger.info(f"📊 Resumen:")
-    logger.info(f"   - Registros: {result['total_rows']:,}")
-    logger.info(f"   - Columnas: {result['total_columns']}")
+    logger.info(f"")
+    logger.info(f"   MASTER TABLE:")
+    logger.info(f"      • Registros: {result['total_rows']:,}")
+    logger.info(f"      • Columnas: {result['total_columns']}")
     if result.get('target_stats'):
-        logger.info(f"   - Target 'Delayed_time':")
-        logger.info(f"      • Min: {result['target_stats']['min']:.0f} días")
-        logger.info(f"      • Max: {result['target_stats']['max']:.0f} días")
-        logger.info(f"      • Media: {result['target_stats']['mean']:.1f} días")
+        logger.info(f"      • Target 'Delayed_time':")
+        logger.info(f"         - Min: {result['target_stats']['min']:.0f} días")
+        logger.info(f"         - Max: {result['target_stats']['max']:.0f} días")
+        logger.info(f"         - Media: {result['target_stats']['mean']:.1f} días")
+    
+    # Agregar métricas del modelo
+    if model_metrics:
+        logger.info(f"")
+        logger.info(f"   MODELO XGBOOST:")
+        logger.info(f"      • Test MAE: {model_metrics['test']['mae']:.2f} días")
+        logger.info(f"      • Test RMSE: {model_metrics['test']['rmse']:.2f} días")
+        logger.info(f"      • Test R²: {model_metrics['test']['r2']:.4f}")
+        logger.info(f"      • Features usadas: {model_metrics['n_features']}")
+    logger.info(f"")
+    logger.info(f"   FEATURES TABLE:")
+    logger.info(f"      • Registros: {len(features_df):,}")
+    logger.info(f"      • Columnas: {len(features_df.columns)}")
+    logger.info(f"")
+    logger.info(f"   GEOLOCATION:")
+    logger.info(f"      • Tabla sin duplicados guardada")
     logger.info("=" * 80)
+    
+    # Actualizar resultado con info de features
+    result['features'] = {
+        'total_rows': len(features_df),
+        'total_columns': len(features_df.columns)
+    }
     
     return result
 
