@@ -22,6 +22,8 @@ import pickle
 from typing import List
 from business_kpis import calculate_business_kpis
 from visualization import generate_all_visualizations
+from visualization import generate_all_visualizations
+from sla_analysis import analyze_sla_complete
 
 
 
@@ -1128,6 +1130,11 @@ def silver_to_gold():
         model_metrics=model_metrics,
         cv_results=cv_results
     )
+
+    # ============================================================
+    # ANÁLISIS DE SLA
+    # ============================================================
+    sla_analysis_result = analyze_sla_complete(master_df)
 
     # ============================================================
     # CALCULAR KPIs DE NEGOCIO
