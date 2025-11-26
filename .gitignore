@@ -9,3 +9,4 @@ data/*.csv
 *.pkl
 .DS_Store
 *.json
+*.png
