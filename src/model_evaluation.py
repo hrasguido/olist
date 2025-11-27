@@ -8,7 +8,7 @@ import numpy as np
 from typing import Dict, List, Tuple
 from sklearn.model_selection import cross_val_score, cross_validate, KFold
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+#from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import xgboost as xgb
 import warnings
@@ -167,18 +167,6 @@ def compare_models(
         'Linear Regression': LinearRegression(),
         'Ridge Regression': Ridge(alpha=1.0, random_state=random_state),
         'Lasso Regression': Lasso(alpha=1.0, random_state=random_state),
-        'Random Forest': RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            random_state=random_state,
-            n_jobs=-1
-        ),
-        'Gradient Boosting': GradientBoostingRegressor(
-            n_estimators=100,
-            max_depth=5,
-            learning_rate=0.1,
-            random_state=random_state
-        ),
         'XGBoost': xgb.XGBRegressor(
             n_estimators=100,
             max_depth=6,
