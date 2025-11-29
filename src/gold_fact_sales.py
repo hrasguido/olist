@@ -1039,7 +1039,7 @@ def silver_to_gold():
         master_df, 
         target_col='Delayed_time',
         correlation_threshold=0.05,
-        top_n_features=10
+        top_n_features=50
     )
 
     # ============================================================
