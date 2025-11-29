@@ -21,7 +21,9 @@ plt.rcParams['font.size'] = 10
 
 # Configurar carpeta de outputs (ruta relativa)
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs')
+VISUALIZATIONS_DIR = os.path.join(OUTPUT_DIR, 'visualizations')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(VISUALIZATIONS_DIR, exist_ok=True)
 
 
 @task(log_prints=True)
@@ -49,7 +51,7 @@ def plot_feature_importance(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'feature_importance_plot_{timestamp}.png')
+        output_path = os.path.join(VISUALIZATIONS_DIR, f'feature_importance_plot_{timestamp}.png')
     
     # Crear DataFrame con importancias
     feature_importance = pd.DataFrame({
@@ -113,7 +115,7 @@ def plot_model_performance(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'model_performance_plot_{timestamp}.png')
+        output_path = os.path.join(VISUALIZATIONS_DIR, f'model_performance_plot_{timestamp}.png')
     
     # Verificar columnas necesarias
     if 'Delayed_time' not in master_df.columns or 'Delayed_time_predicted' not in master_df.columns:
@@ -287,7 +289,7 @@ def plot_cv_comparison(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'model_comparison_plot_{timestamp}.png')
+        output_path = os.path.join(VISUALIZATIONS_DIR, f'model_comparison_plot_{timestamp}.png')
     
     # Crear figura
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))

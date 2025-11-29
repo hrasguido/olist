@@ -19,7 +19,11 @@ sns.set_style("whitegrid")
 
 # Configurar carpeta de outputs (ruta relativa)
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs')
+SLA_REPORTS_DIR = os.path.join(OUTPUT_DIR, 'sla_reports')
+VISUALIZATIONS_DIR = os.path.join(OUTPUT_DIR, 'visualizations')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(SLA_REPORTS_DIR, exist_ok=True)
+os.makedirs(VISUALIZATIONS_DIR, exist_ok=True)
 
 
 @task(log_prints=True)
@@ -308,7 +312,7 @@ def plot_sla_analysis(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'sla_analysis_plot_{timestamp}.png')
+        output_path = os.path.join(VISUALIZATIONS_DIR, f'sla_analysis_plot_{timestamp}.png')
     
     # Verificar si hay predicciones
     has_predictions = sla_metrics.get('has_predictions', False) and 'delivery_time_predicted_days' in df_with_sla.columns
@@ -624,7 +628,7 @@ def save_sla_report(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'sla_report_{timestamp}.csv')
+        output_path = os.path.join(SLA_REPORTS_DIR, f'sla_report_{timestamp}.csv')
     
     # Crear reporte resumido
     report_data = [

@@ -12,7 +12,9 @@ from typing import Dict
 
 # Configurar carpeta de outputs (ruta relativa)
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs')
+BUSINESS_KPIS_DIR = os.path.join(OUTPUT_DIR, 'business_kpis')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(BUSINESS_KPIS_DIR, exist_ok=True)
 
 
 @task(log_prints=True)
@@ -227,23 +229,23 @@ def calculate_business_kpis(master_df: pd.DataFrame) -> Dict:
         {'KPI': 'Precisión del Modelo', 'Valor': f"{kpis.get('model_accuracy', 0):.2f}%"},
     ])
     
-    summary_path = os.path.join(OUTPUT_DIR, f'business_kpis_summary_{timestamp}.csv')
+    summary_path = os.path.join(BUSINESS_KPIS_DIR, f'business_kpis_summary_{timestamp}.csv')
     kpis_summary.to_csv(summary_path, index=False)
     logger.info(f"   ✅ Resumen de KPIs: {summary_path}")
     
     # 2. KPIs detallados por dimensión
     if 'state_kpis' in kpis:
-        state_path = os.path.join(OUTPUT_DIR, f'kpis_by_state_{timestamp}.csv')
+        state_path = os.path.join(BUSINESS_KPIS_DIR, f'kpis_by_state_{timestamp}.csv')
         kpis['state_kpis'].to_csv(state_path)
         logger.info(f"   ✅ KPIs por estado: {state_path}")
     
     if 'payment_kpis' in kpis:
-        payment_path = os.path.join(OUTPUT_DIR, f'kpis_by_payment_{timestamp}.csv')
+        payment_path = os.path.join(BUSINESS_KPIS_DIR, f'kpis_by_payment_{timestamp}.csv')
         kpis['payment_kpis'].to_csv(payment_path)
         logger.info(f"   ✅ KPIs por método de pago: {payment_path}")
     
     if 'price_kpis' in kpis:
-        price_path = os.path.join(OUTPUT_DIR, f'kpis_by_price_{timestamp}.csv')
+        price_path = os.path.join(BUSINESS_KPIS_DIR, f'kpis_by_price_{timestamp}.csv')
         kpis['price_kpis'].to_csv(price_path)
         logger.info(f"   ✅ KPIs por rango de precio: {price_path}")
     

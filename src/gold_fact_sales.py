@@ -41,7 +41,13 @@ load_dotenv(env_path)
 
 # Configurar carpeta de outputs (ruta relativa)
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs')
+PKLS_DIR = os.path.join(OUTPUT_DIR, 'pkls')
+MODEL_METRICS_DIR = os.path.join(OUTPUT_DIR, 'model_metrics')
+FEATURE_IMPORTANCES_DIR = os.path.join(OUTPUT_DIR, 'feature_importances')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(PKLS_DIR, exist_ok=True)
+os.makedirs(MODEL_METRICS_DIR, exist_ok=True)
+os.makedirs(FEATURE_IMPORTANCES_DIR, exist_ok=True)
 
 SILVER_CONN = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@db:5432/silver"
 GOLD_CONN   = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@db:5432/gold"
@@ -818,7 +824,7 @@ def save_model_pickle(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'xgboost_model_{timestamp}.pkl')
+        output_path = os.path.join(PKLS_DIR, f'xgboost_model_{timestamp}.pkl')
     
     # Crear diccionario con modelo y metadata
     model_package = {
@@ -872,7 +878,7 @@ def save_feature_importance(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'feature_importance_{timestamp}.csv')
+        output_path = os.path.join(FEATURE_IMPORTANCES_DIR, f'feature_importance_{timestamp}.csv')
     
     # Crear DataFrame con importancias
     feature_importance = pd.DataFrame({
@@ -913,7 +919,7 @@ def save_model_metrics(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'model_metrics_{timestamp}.json')
+        output_path = os.path.join(MODEL_METRICS_DIR, f'model_metrics_{timestamp}.json')
     
     # Preparar datos para guardar
     metrics_data = {
@@ -1033,7 +1039,7 @@ def silver_to_gold():
         master_df, 
         target_col='Delayed_time',
         correlation_threshold=0.05,
-        top_n_features=50
+        top_n_features=10
     )
 
     # ============================================================

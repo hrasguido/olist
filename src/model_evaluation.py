@@ -17,7 +17,9 @@ warnings.filterwarnings('ignore')
 
 # Configurar carpeta de outputs (ruta relativa)
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs')
+MODEL_COMPARISONS_DIR = os.path.join(OUTPUT_DIR, 'model_comparisons')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(MODEL_COMPARISONS_DIR, exist_ok=True)
 
 
 
@@ -312,7 +314,7 @@ def save_comparison_results(
     # Definir ruta por defecto con timestamp
     if output_path is None:
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        output_path = os.path.join(OUTPUT_DIR, f'model_comparison_{timestamp}.csv')
+        output_path = os.path.join(MODEL_COMPARISONS_DIR, f'model_comparison_{timestamp}.csv')
     
     logger.info(f"💾 Guardando resultados en: {output_path}")
     
