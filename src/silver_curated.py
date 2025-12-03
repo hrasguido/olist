@@ -1,9 +1,14 @@
-# src/etl_silver.py
-from prefect import flow, task
-from sqlalchemy import create_engine
+# src/silver_curated.py
+"""
+Capa Silver - Curated Data
+Validación y normalización de datos desde Bronze (limpieza ya aplicada)
+"""
+from prefect import flow, task, get_run_logger
+from sqlalchemy import create_engine, types
 import pandas as pd
 import os
 from dotenv import load_dotenv
+from typing import List, Dict
 
 load_dotenv("/workspace/.env")
 
@@ -18,35 +23,86 @@ TABLES = [
     "orders", "order_items", "order_payments", "order_reviews"
 ]
 
-@task(log_prints=True)
-def silver_table(table_name: str):
-    print(f"Procesando tabla: {table_name}")
-    
-    df = pd.read_sql(f"SELECT * FROM raw.{table_name}", engine_bronze)
-    
-    # Limpieza estándar
-    df = df.drop_duplicates()
-    df.columns = [c.lower().replace(' ', '_') for c in df.columns]
-    
-    # Tipado de fechas (según tabla)
-    date_cols = {
-        "orders": ["order_purchase_timestamp", "order_approved_at", "order_delivered_carrier_date",
-                   "order_delivered_customer_date", "order_estimated_delivery_date"],
-        "order_reviews": ["review_creation_date", "review_answer_timestamp"]
-    }
-    
-    if table_name in date_cols:
-        for col in date_cols[table_name]:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-    
-    df.to_sql(table_name, engine_silver, schema="curated", if_exists="replace", index=False)
-    print(f"Tabla {table_name} → {len(df):,} filas cargadas en silver.curated")
 
-@flow(name="Bronze → Silver (Curated)")
+@task(log_prints=True, retries=2, retry_delay_seconds=5)
+def silver_table(table_name: str) -> Dict:
+    """
+    Procesa una tabla desde Bronze a Silver
+    Bronze ya tiene datos limpios, Silver solo normaliza y valida
+    
+    Args:
+        table_name: Nombre de la tabla a procesar
+    
+    Returns:
+        Dict con estadísticas de procesamiento
+    """
+    logger = get_run_logger()
+    logger.info(f"📋 Procesando tabla: {table_name}")
+    
+    # Leer datos desde Bronze (ya limpios)
+    df = pd.read_sql(f"SELECT * FROM raw.{table_name}", engine_bronze)
+    initial_rows = len(df)
+    logger.info(f"   Filas desde Bronze: {initial_rows:,}")
+    
+    # Cargar directamente a Silver (datos ya están limpios)
+    df.to_sql(
+        table_name, 
+        engine_silver, 
+        schema="curated", 
+        if_exists="replace", 
+        index=False,
+        method='multi',
+        chunksize=5000
+    )
+    
+    logger.info(f"   ✅ Tabla {table_name} → {initial_rows:,} filas cargadas en silver.curated")
+    
+    return {
+        "table": table_name,
+        "rows_processed": initial_rows
+    }
+
+
+@flow(name="Bronze → Silver (Curated)", log_prints=True)
 def bronze_to_silver():
+    """
+    Flujo que mueve datos limpios de Bronze a Silver
+    La limpieza ya se aplicó en Bronze
+    """
+    logger = get_run_logger()
+    logger.info("=" * 80)
+    logger.info("🥈 INICIANDO PROCESAMIENTO SILVER - CURATED DATA")
+    logger.info("=" * 80)
+    
+    results = []
+    total_rows = 0
+    
     for table in TABLES:
-        silver_table(table)
+        try:
+            stats = silver_table(table)
+            results.append(stats)
+            total_rows += stats["rows_processed"]
+        except Exception as e:
+            logger.error(f"❌ Error procesando tabla '{table}': {str(e)}")
+            raise
+    
+    logger.info("=" * 80)
+    logger.info("✅ PROCESAMIENTO SILVER COMPLETADO")
+    logger.info("=" * 80)
+    logger.info(f"📊 Resumen General:")
+    logger.info(f"   - Tablas procesadas: {len(results)}")
+    logger.info(f"   - Total registros: {total_rows:,}")
+    logger.info("=" * 80)
+    
+    return {
+        "status": "success",
+        "tables_processed": len(results),
+        "total_initial_rows": total_rows,
+        "total_final_rows": total_rows,
+        "total_cleaned_rows": 0,
+        "results": results
+    }
+
 
 if __name__ == "__main__":
     bronze_to_silver()

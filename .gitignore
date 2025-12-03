@@ -3,3 +3,10 @@ __pycache__
 .prefect/
 *.log
 data/*.csv
+
+.venv/
+*.csv
+*.pkl
+.DS_Store
+*.json
+*.png

@@ -28,6 +28,8 @@ services:
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
     ports:
       - "8081:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
     depends_on:
       db:
         condition: service_healthy
@@ -88,4 +90,8 @@ volumes:
   postgres_data:
   python_deps:
   prefect_data:
+<<<<<<< HEAD
   streamlit_deps:
+=======
+  pgadmin_data:
+>>>>>>> 5eefbc1e90b26b213ababb0c7418908cffeb543e
