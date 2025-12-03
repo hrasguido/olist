@@ -448,5 +448,99 @@ def generate_all_visualizations(
     for viz_name, viz_path in viz_paths.items():
         logger.info(f"   📊 {viz_name}: {viz_path}")
     logger.info("=" * 80)
+
+    # 4. Optuna vs Baseline (si está disponible)
+    if cv_results and 'results_df' in cv_results:
+        optuna_comparison_path = plot_optuna_vs_baseline(
+            cv_results['results_df'], 
+            model_metrics
+        )
+        viz_paths['optuna_comparison'] = optuna_comparison_path
     
     return viz_paths
+
+@task(log_prints=True)
+def plot_optuna_vs_baseline(
+    cv_results_df: pd.DataFrame,
+    optuna_metrics: Dict,
+    output_path: str = None
+) -> str:
+    """
+    Compara el modelo optimizado con Optuna vs los modelos baseline.
+    """
+    logger = get_run_logger()
+    logger.info("📊 Generando gráfico Optuna vs Baseline...")
+    
+    # Definir ruta
+    if output_path is None:
+        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
+        output_path = os.path.join(VISUALIZATIONS_DIR, f'optuna_comparison_{timestamp}.png')
+    
+    # Crear figura
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle('XGBoost: Baseline vs Optimizado con Optuna', 
+                 fontsize=16, fontweight='bold')
+    
+    # Obtener métricas de XGBoost baseline
+    xgb_baseline = cv_results_df[cv_results_df['model_name'] == 'XGBoost'].iloc[0]
+    
+    # Datos para comparación
+    models = ['XGBoost\n(Baseline)', 'XGBoost\n(Optuna)']
+    mae_values = [xgb_baseline['test_mae_mean'], optuna_metrics['test']['mae']]
+    rmse_values = [xgb_baseline['test_rmse_mean'], optuna_metrics['test']['rmse']]
+    r2_values = [xgb_baseline['test_r2_mean'], optuna_metrics['test']['r2']]
+    
+    # MAE
+    ax1 = axes[0]
+    bars = ax1.bar(models, mae_values, color=['steelblue', 'coral'], alpha=0.8, edgecolor='none')
+    ax1.set_ylabel('MAE (días)', fontsize=11, fontweight='bold')
+    ax1.set_title('Mean Absolute Error', fontsize=13, fontweight='bold')
+    ax1.grid(True, alpha=0.3, axis='y')
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height,
+                f'{mae_values[i]:.2f}', ha='center', va='bottom', fontsize=10)
+    
+    # RMSE
+    ax2 = axes[1]
+    bars = ax2.bar(models, rmse_values, color=['steelblue', 'coral'], alpha=0.8, edgecolor='none')
+    ax2.set_ylabel('RMSE (días)', fontsize=11, fontweight='bold')
+    ax2.set_title('Root Mean Squared Error', fontsize=13, fontweight='bold')
+    ax2.grid(True, alpha=0.3, axis='y')
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height,
+                f'{rmse_values[i]:.2f}', ha='center', va='bottom', fontsize=10)
+    
+    # R²
+    ax3 = axes[2]
+    bars = ax3.bar(models, r2_values, color=['steelblue', 'coral'], alpha=0.8, edgecolor='none')
+    ax3.set_ylabel('R²', fontsize=11, fontweight='bold')
+    ax3.set_title('Coeficiente de Determinación', fontsize=13, fontweight='bold')
+    ax3.grid(True, alpha=0.3, axis='y')
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        ax3.text(bar.get_x() + bar.get_width()/2., height,
+                f'{r2_values[i]:.4f}', ha='center', va='bottom', fontsize=10)
+    
+    # Calcular mejora
+    mae_improvement = ((xgb_baseline['test_mae_mean'] - optuna_metrics['test']['mae']) / 
+                       xgb_baseline['test_mae_mean'] * 100)
+    r2_improvement = ((optuna_metrics['test']['r2'] - xgb_baseline['test_r2_mean']) / 
+                      xgb_baseline['test_r2_mean'] * 100)
+    
+    # Agregar texto de mejora
+    fig.text(0.5, 0.02, 
+             f"Mejora con Optuna: MAE {mae_improvement:+.1f}% | R² {r2_improvement:+.1f}%",
+             ha='center', fontsize=12, fontweight='bold', 
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    plt.tight_layout(rect=[0, 0.05, 1, 0.96])
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    logger.info(f"   ✅ Gráfico guardado en: {output_path}")
+    logger.info(f"   📈 Mejora MAE: {mae_improvement:+.1f}%")
+    logger.info(f"   📈 Mejora R²: {r2_improvement:+.1f}%")
+    
+    return output_path

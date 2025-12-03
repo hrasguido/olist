@@ -25,6 +25,7 @@ from visualization import generate_all_visualizations
 from visualization import generate_all_visualizations
 from sla_analysis import analyze_sla_complete
 
+from backtesting import generate_backtest_report  # ✅ NUEVO
 
 
 from gold_features import (
@@ -238,8 +239,8 @@ def build_master_table(datasets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         
         # Filtrar rango válido: -10 a +20 días
         master = master[
-            (master['Delayed_time'] >= -5) & 
-            (master['Delayed_time'] <= 20)
+            (master['Delayed_time'] >= -3) & 
+            (master['Delayed_time'] <= 12)
         ].copy()
         
         removed = initial_count - len(master)
@@ -251,6 +252,108 @@ def build_master_table(datasets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     logger.info(f"   ✅ Master Table: {len(master):,} registros, {len(master.columns)} columnas")
     
     return master
+
+@task(log_prints=True)
+def add_geographic_distance_features(master_df: pd.DataFrame, geolocation_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calcula la distancia geográfica entre customer y seller usando coordenadas.
+    """
+    logger = get_run_logger()
+    logger.info("🗺️  Calculando distancias geográficas...")
+    
+    from math import radians, sin, cos, sqrt, atan2
+    
+    def haversine_distance(lat1, lon1, lat2, lon2):
+        """Calcula distancia Haversine en km."""
+        if pd.isna(lat1) or pd.isna(lon1) or pd.isna(lat2) or pd.isna(lon2):
+            return np.nan
+        
+        R = 6371  # Radio de la Tierra en km
+        lat1_rad, lon1_rad = radians(lat1), radians(lon1)
+        lat2_rad, lon2_rad = radians(lat2), radians(lon2)
+        dlon = lon2_rad - lon1_rad
+        dlat = lat2_rad - lat1_rad
+        a = sin(dlat / 2)**2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlon / 2)**2
+        c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        distance = R * c
+        return distance
+    
+    # Preparar geolocation (promediar por zip code)
+    if geolocation_df.empty:
+        logger.warning("   ⚠️  Geolocation vacío, se omite cálculo de distancias")
+        return master_df
+    
+    geo_df = geolocation_df.copy()
+    geo_df['geolocation_zip_code_prefix'] = pd.to_numeric(
+        geo_df['geolocation_zip_code_prefix'], errors='coerce'
+    )
+    
+    geo_unique = geo_df.groupby('geolocation_zip_code_prefix').agg({
+        'geolocation_lat': 'mean',
+        'geolocation_lng': 'mean'
+    }).reset_index()
+    
+    # Merge con customer zip
+    if 'customer_zip_code_prefix' in master_df.columns:
+        master_df['customer_zip_code_prefix'] = pd.to_numeric(
+            master_df['customer_zip_code_prefix'], errors='coerce'
+        )
+        master_df = master_df.merge(
+            geo_unique.rename(columns={
+                'geolocation_zip_code_prefix': 'customer_zip_code_prefix',
+                'geolocation_lat': 'customer_lat',
+                'geolocation_lng': 'customer_lng'
+            }),
+            on='customer_zip_code_prefix',
+            how='left'
+        )
+    
+    # Merge con seller zip
+    if 'seller_zip_code_prefix' in master_df.columns:
+        master_df['seller_zip_code_prefix'] = pd.to_numeric(
+            master_df['seller_zip_code_prefix'], errors='coerce'
+        )
+        master_df = master_df.merge(
+            geo_unique.rename(columns={
+                'geolocation_zip_code_prefix': 'seller_zip_code_prefix',
+                'geolocation_lat': 'seller_lat',
+                'geolocation_lng': 'seller_lng'
+            }),
+            on='seller_zip_code_prefix',
+            how='left'
+        )
+    
+    # Calcular distancia
+    if all(col in master_df.columns for col in ['customer_lat', 'customer_lng', 'seller_lat', 'seller_lng']):
+        logger.info("   📏 Calculando distancias Haversine...")
+        master_df['distance_km'] = master_df.apply(
+            lambda row: haversine_distance(
+                row['customer_lat'], row['customer_lng'],
+                row['seller_lat'], row['seller_lng']
+            ),
+            axis=1
+        )
+        
+        # Features derivadas de distancia
+        master_df['distance_km'] = master_df['distance_km'].fillna(master_df['distance_km'].median())
+        master_df['log_distance'] = np.log1p(master_df['distance_km'])
+        master_df['is_long_distance'] = (master_df['distance_km'] > 1000).astype(int)
+        
+        # Ratio distancia/freight (eficiencia logística)
+        if 'freight_value' in master_df.columns:
+            master_df['distance_per_freight'] = np.where(
+                master_df['freight_value'] > 0,
+                master_df['distance_km'] / master_df['freight_value'],
+                0
+            )
+        
+        logger.info(f"      ✅ Distancia calculada para {master_df['distance_km'].notna().sum():,} registros")
+        logger.info(f"      • Distancia promedio: {master_df['distance_km'].mean():.1f} km")
+        logger.info(f"      • Distancia máxima: {master_df['distance_km'].max():.1f} km")
+    else:
+        logger.warning("   ⚠️  No se encontraron todas las columnas necesarias para calcular distancia")
+    
+    return master_df
 
 @task(log_prints=True)
 def apply_one_hot_encoding(master_df: pd.DataFrame) -> pd.DataFrame:
@@ -340,6 +443,183 @@ def apply_one_hot_encoding(master_df: pd.DataFrame) -> pd.DataFrame:
     logger.info(f"      • Columnas iniciales: {initial_columns}")
     logger.info(f"      • Columnas finales: {final_columns}")
     logger.info(f"      • Nuevas columnas: {new_columns}")
+    
+    return master_df
+
+@task(log_prints=True)
+def create_historical_features(master_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Crea features basadas en el comportamiento histórico de sellers, 
+    customers y categorías de productos.
+    """
+    logger = get_run_logger()
+    logger.info("📊 Creando features históricas...")
+    
+    initial_cols = len(master_df.columns)
+    
+    # 1. Features por SELLER (vendedor)
+    if 'seller_id' in master_df.columns and 'Delayed_time' in master_df.columns:
+        logger.info("   🏪 Calculando estadísticas por seller...")
+        seller_stats = master_df.groupby('seller_id').agg({
+            'Delayed_time': ['mean', 'std', 'median', 'count'],
+            'freight_value': 'mean' if 'freight_value' in master_df.columns else lambda x: 0,
+            'price': 'mean' if 'price' in master_df.columns else lambda x: 0
+        }).reset_index()
+        
+        seller_stats.columns = ['seller_id', 'seller_avg_delay', 'seller_std_delay', 
+                                'seller_median_delay', 'seller_order_count', 
+                                'seller_avg_freight', 'seller_avg_price']
+        
+        # Calcular tasa de retraso del seller (% de órdenes con delay > 0)
+        seller_delay_rate = master_df.groupby('seller_id').apply(
+            lambda x: (x['Delayed_time'] > 0).sum() / len(x)
+        ).reset_index()
+        seller_delay_rate.columns = ['seller_id', 'seller_delay_rate']
+        
+        seller_stats = seller_stats.merge(seller_delay_rate, on='seller_id', how='left')
+        
+        # Merge con master
+        master_df = master_df.merge(seller_stats, on='seller_id', how='left', suffixes=('', '_hist'))
+        logger.info(f"      ✅ {len(seller_stats.columns)-1} features de seller agregadas")
+    
+    # 2. Features por CUSTOMER STATE (estado del cliente)
+    if 'customer_state' in master_df.columns:
+        logger.info("   🗺️  Calculando estadísticas por estado...")
+        state_stats = master_df.groupby('customer_state').agg({
+            'Delayed_time': ['mean', 'std', 'median', 'count']
+        }).reset_index()
+        
+        state_stats.columns = ['customer_state', 'state_avg_delay', 'state_std_delay',
+                               'state_median_delay', 'state_order_count']
+        
+        master_df = master_df.merge(state_stats, on='customer_state', how='left', suffixes=('', '_hist'))
+        logger.info(f"      ✅ {len(state_stats.columns)-1} features de estado agregadas")
+    
+    # 3. Features por PRODUCT CATEGORY (categoría de producto)
+    if 'product_category_name' in master_df.columns:
+        logger.info("   📦 Calculando estadísticas por categoría...")
+        category_stats = master_df.groupby('product_category_name').agg({
+            'Delayed_time': ['mean', 'std', 'median', 'count']
+        }).reset_index()
+        
+        category_stats.columns = ['product_category_name', 'category_avg_delay', 
+                                  'category_std_delay', 'category_median_delay',
+                                  'category_order_count']
+        
+        master_df = master_df.merge(category_stats, on='product_category_name', 
+                                    how='left', suffixes=('', '_hist'))
+        logger.info(f"      ✅ {len(category_stats.columns)-1} features de categoría agregadas")
+    
+    # 4. Features por SELLER STATE (estado del vendedor)
+    if 'seller_state' in master_df.columns:
+        logger.info("   🏭 Calculando estadísticas por estado del seller...")
+        seller_state_stats = master_df.groupby('seller_state').agg({
+            'Delayed_time': ['mean', 'std']
+        }).reset_index()
+        
+        seller_state_stats.columns = ['seller_state', 'seller_state_avg_delay', 
+                                       'seller_state_std_delay']
+        
+        master_df = master_df.merge(seller_state_stats, on='seller_state', 
+                                    how='left', suffixes=('', '_hist'))
+        logger.info(f"      ✅ {len(seller_state_stats.columns)-1} features de seller_state agregadas")
+    
+    # 5. Features de INTERACCIÓN GEOGRÁFICA
+    if 'customer_state' in master_df.columns and 'seller_state' in master_df.columns:
+        logger.info("   🌐 Calculando features de ruta (customer-seller)...")
+        
+        # Crear feature de ruta (combinación customer_state -> seller_state)
+        master_df['route'] = master_df['customer_state'] + '_to_' + master_df['seller_state']
+        
+        route_stats = master_df.groupby('route').agg({
+            'Delayed_time': ['mean', 'std', 'count']
+        }).reset_index()
+        
+        route_stats.columns = ['route', 'route_avg_delay', 'route_std_delay', 'route_order_count']
+        
+        master_df = master_df.merge(route_stats, on='route', how='left', suffixes=('', '_hist'))
+        
+        # Eliminar la columna 'route' después de usarla (es categórica con muchos valores)
+        master_df = master_df.drop(columns=['route'])
+        
+        logger.info(f"      ✅ 3 features de ruta agregadas")
+    
+    final_cols = len(master_df.columns)
+    new_cols = final_cols - initial_cols
+    
+    logger.info(f"   ✅ Total features históricas creadas: {new_cols}")
+    logger.info(f"   📊 Columnas totales: {initial_cols} → {final_cols}")
+    
+    return master_df
+
+@task(log_prints=True)
+def create_temporal_rolling_features(master_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Crea features de ventanas temporales móviles (últimos 7, 30, 90 días).
+    """
+    logger = get_run_logger()
+    logger.info("📅 Creando features de ventanas temporales...")
+    
+    if 'order_purchase_timestamp' not in master_df.columns:
+        logger.warning("   ⚠️  No se encontró order_purchase_timestamp")
+        return master_df
+    
+    initial_cols = len(master_df.columns)
+    
+    # Ordenar por fecha
+    master_df = master_df.sort_values('order_purchase_timestamp').reset_index(drop=True)
+    
+    # 1. Rolling features por SELLER
+    if 'seller_id' in master_df.columns:
+        logger.info("   🏪 Calculando rolling features por seller...")
+        
+        for window in [7, 30, 90]:
+            # Media móvil de delay
+            master_df[f'seller_delay_rolling_{window}d'] = master_df.groupby('seller_id')['Delayed_time'].transform(
+                lambda x: x.shift(1).rolling(window=window, min_periods=1).mean()
+            )
+            
+            # Desviación estándar móvil
+            master_df[f'seller_delay_std_rolling_{window}d'] = master_df.groupby('seller_id')['Delayed_time'].transform(
+                lambda x: x.shift(1).rolling(window=window, min_periods=1).std()
+            ).fillna(0)
+            
+            # Máximo móvil
+            master_df[f'seller_delay_max_rolling_{window}d'] = master_df.groupby('seller_id')['Delayed_time'].transform(
+                lambda x: x.shift(1).rolling(window=window, min_periods=1).max()
+            )
+        
+        logger.info(f"      ✅ 9 features rolling por seller creadas")
+    
+    # 2. Rolling features por CUSTOMER STATE
+    if 'customer_state' in master_df.columns:
+        logger.info("   🗺️  Calculando rolling features por estado...")
+        
+        for window in [30, 90]:
+            master_df[f'state_delay_rolling_{window}d'] = master_df.groupby('customer_state')['Delayed_time'].transform(
+                lambda x: x.shift(1).rolling(window=window, min_periods=1).mean()
+            )
+        
+        logger.info(f"      ✅ 2 features rolling por estado creadas")
+    
+    # 3. Rolling features por PRODUCT CATEGORY
+    if 'product_category_name' in master_df.columns:
+        logger.info("   📦 Calculando rolling features por categoría...")
+        
+        master_df['category_delay_rolling_30d'] = master_df.groupby('product_category_name')['Delayed_time'].transform(
+            lambda x: x.shift(1).rolling(window=30, min_periods=1).mean()
+        )
+        
+        logger.info(f"      ✅ 1 feature rolling por categoría creada")
+    
+    # 4. Tendencia global (últimos 30 días)
+    logger.info("   🌍 Calculando tendencia global...")
+    master_df['global_delay_rolling_30d'] = master_df['Delayed_time'].shift(1).rolling(window=30, min_periods=1).mean()
+    
+    final_cols = len(master_df.columns)
+    new_cols = final_cols - initial_cols
+    
+    logger.info(f"   ✅ Total features rolling creadas: {new_cols}")
     
     return master_df
 
@@ -500,6 +780,193 @@ def feature_selection(master_df: pd.DataFrame, target_col: str = 'Delayed_time',
     
     return reduced_df
 
+
+
+import numpy as np
+import pandas as pd
+from prefect import task, get_run_logger
+
+# AGREGAR DESPUÉS de la línea 501
+
+@task(log_prints=True)
+def transform_target_if_needed(master_df: pd.DataFrame, target_col: str = 'Delayed_time') -> tuple:
+    """
+    Transforma el target si tiene alta asimetría y retorna los metadatos 
+    necesarios para invertir la transformación después.
+    """
+    logger = get_run_logger()
+    logger.info(f"🔄 Analizando distribución del target...")
+    
+    skewness = master_df[target_col].skew()
+    logger.info(f"   • Skewness actual: {skewness:.2f}")
+    
+    transform_metadata = {
+        'applied': False,
+        'type': None,
+        'shift': 0
+    }
+
+    # Si skewness > 1 o < -1, aplicar transformación
+    if abs(skewness) > 1:
+        logger.info(f"   ⚠️  Alta asimetría detectada, aplicando transformación...")
+        
+        # NO guardamos la columna '_original' en master_df para evitar Data Leakage
+        # Si necesitas comparar luego, usa una variable externa al set de entrenamiento
+        
+        transform_metadata['applied'] = True
+
+        # Aplicar log1p (log(1+x)) para valores positivos
+        if master_df[target_col].min() >= 0:
+            master_df[target_col] = np.log1p(master_df[target_col])
+            transform_metadata['type'] = 'log1p'
+        else:
+            # Para valores negativos, usar Box-Cox modificado (Shift)
+            shift = abs(master_df[target_col].min()) + 1
+            master_df[target_col] = np.log1p(master_df[target_col] + shift)
+            transform_metadata['type'] = f'log1p_shift'
+            transform_metadata['shift'] = shift
+        
+        new_skewness = master_df[target_col].skew()
+        logger.info(f"   ✅ Transformación aplicada: {transform_metadata['type']}")
+        logger.info(f"   ✅ Nuevo skewness: {new_skewness:.2f}")
+        
+        return master_df, transform_metadata
+    else:
+        logger.info(f"   ✅ Distribución aceptable, no se requiere transformación")
+        return master_df, transform_metadata
+
+
+@task(log_prints=True)
+def scale_features(master_df: pd.DataFrame, target_col: str = 'Delayed_time') -> pd.DataFrame:
+    """
+    Escala features numéricas usando RobustScaler (resistente a outliers).
+    """
+    logger = get_run_logger()
+    logger.info("📏 Escalando features numéricas...")
+    
+    from sklearn.preprocessing import RobustScaler
+    
+    # Identificar columnas a escalar
+    numeric_cols = master_df.select_dtypes(include=[np.number]).columns
+    cols_to_scale = [col for col in numeric_cols 
+                    if col != target_col 
+                    and 'id' not in col.lower()
+                    and not col.endswith('_original')]
+    
+    # Escalar
+    scaler = RobustScaler()
+    master_df[cols_to_scale] = scaler.fit_transform(master_df[cols_to_scale])
+    
+    logger.info(f"   ✅ Features escaladas: {len(cols_to_scale)}")
+    
+    return master_df
+
+@task(log_prints=True)
+def create_interaction_features(master_df: pd.DataFrame, top_n: int = 5) -> pd.DataFrame:
+    """
+    Crea features de interacción entre las más importantes.
+    """
+    logger = get_run_logger()
+    logger.info(f"🔀 Creando features de interacción (top {top_n})...")
+    
+    # Identificar top features por correlación con target
+    numeric_cols = [col for col in master_df.select_dtypes(include=[np.number]).columns 
+                   if col != 'Delayed_time' and 'id' not in col.lower()]
+    
+    correlations = {}
+    for col in numeric_cols:
+        corr = abs(master_df[col].corr(master_df['Delayed_time']))
+        if not np.isnan(corr):
+            correlations[col] = corr
+    
+    top_features = sorted(correlations.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    top_feature_names = [f[0] for f in top_features]
+    
+    logger.info(f"   • Top features: {top_feature_names}")
+    
+    # Crear interacciones (multiplicación)
+    interactions_created = 0
+    for i, feat1 in enumerate(top_feature_names):
+        for feat2 in top_feature_names[i+1:]:
+            interaction_name = f"{feat1}_x_{feat2}"
+            master_df[interaction_name] = master_df[feat1] * master_df[feat2]
+            interactions_created += 1
+    
+    # Crear ratios
+    for i, feat1 in enumerate(top_feature_names):
+        for feat2 in top_feature_names[i+1:]:
+            ratio_name = f"{feat1}_div_{feat2}"
+            master_df[ratio_name] = np.where(
+                master_df[feat2] != 0,
+                master_df[feat1] / master_df[feat2],
+                0
+            )
+            interactions_created += 1
+    
+    logger.info(f"   ✅ Features de interacción creadas: {interactions_created}")
+    
+    return master_df
+
+@task(log_prints=True)
+def create_polynomial_features(master_df: pd.DataFrame, top_n: int = 3, degree: int = 2) -> pd.DataFrame:
+    """
+    Crea features polinomiales (cuadráticas) de las más importantes.
+    """
+    logger = get_run_logger()
+    logger.info(f"📐 Creando features polinomiales (grado {degree}, top {top_n})...")
+    
+    # Identificar top features
+    numeric_cols = [col for col in master_df.select_dtypes(include=[np.number]).columns 
+                   if col != 'Delayed_time' and 'id' not in col.lower()]
+    
+    correlations = {}
+    for col in numeric_cols:
+        corr = abs(master_df[col].corr(master_df['Delayed_time']))
+        if not np.isnan(corr):
+            correlations[col] = corr
+    
+    top_features = sorted(correlations.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    top_feature_names = [f[0] for f in top_features]
+    
+    logger.info(f"   • Top features: {top_feature_names}")
+    
+    # Crear features cuadráticas
+    poly_created = 0
+    for feat in top_feature_names:
+        master_df[f"{feat}_squared"] = master_df[feat] ** 2
+        if degree >= 3:
+            master_df[f"{feat}_cubed"] = master_df[feat] ** 3
+        poly_created += 1
+    
+    logger.info(f"   ✅ Features polinomiales creadas: {poly_created * degree}")
+    
+    return master_df
+
+@task(log_prints=True)
+def remove_low_variance_features(master_df: pd.DataFrame, variance_threshold: float = 0.01) -> pd.DataFrame:
+    """
+    Elimina features con varianza muy baja (casi constantes).
+    """
+    logger = get_run_logger()
+    logger.info(f"🧹 Eliminando features con varianza < {variance_threshold}...")
+    
+    numeric_cols = master_df.select_dtypes(include=[np.number]).columns
+    feature_cols = [col for col in numeric_cols 
+                if col != 'Delayed_time' and 'id' not in col.lower()]
+    
+    low_variance_cols = []
+    for col in feature_cols:
+        if master_df[col].std() < variance_threshold:
+            low_variance_cols.append(col)
+    
+    if low_variance_cols:
+        logger.info(f"   • Features eliminadas: {len(low_variance_cols)}")
+        master_df = master_df.drop(columns=low_variance_cols)
+    else:
+        logger.info(f"   • No se encontraron features con baja varianza")
+    
+    return master_df
+
 @task(log_prints=True)
 def optimize_xgboost_hyperparameters(
     X_train: pd.DataFrame, 
@@ -526,25 +993,29 @@ def optimize_xgboost_hyperparameters(
     
     def objective(trial):
         """Función objetivo para Optuna."""
+
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 300, 800),  # ✅ Más árboles
-            'max_depth': trial.suggest_int('max_depth', 6, 20),  # ✅ Más profundidad
-            'learning_rate': trial.suggest_float('learning_rate', 0.003, 0.2, log=True),  # ✅ LR más bajo
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),  # ✅ Más variación
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
-            'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),  # ✅ Ampliado
-            'gamma': trial.suggest_float('gamma', 0.0, 2.0),  # ✅ Ampliado
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 5.0),  # ✅ Más regularización L1
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 5.0),  # ✅ Más regularización L2
-            'max_delta_step': trial.suggest_int('max_delta_step', 0, 5),  # ✅ NUEVO parámetro
+            'n_estimators': trial.suggest_int('n_estimators', 500, 1500),  # ✅ Aumentar rango
+            'max_depth': trial.suggest_int('max_depth', 4, 15),  # ✅ Ajustar rango
+            'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.3, log=True),  # ✅ Más rango
+            'subsample': trial.suggest_float('subsample', 0.5, 1.0),  # ✅ Más variación
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),  # ✅ Más variación
+            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.5, 1.0),  # ✅ Más variación
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 15),  # ✅ Más rango
+            'gamma': trial.suggest_float('gamma', 0.0, 3.0),  # ✅ Más regularización
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 20.0),  # ✅ Más L1
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 20.0),  # ✅ Más L2
+            'max_delta_step': trial.suggest_int('max_delta_step', 0, 10),  # ✅ Más rango
             'random_state': 42,
             'n_jobs': -1,
             'verbosity': 0
         }
         
         # Entrenar modelo con estos hiperparámetros
-        model = xgb.XGBRegressor(**params)
+        model = xgb.XGBRegressor(
+            **params,
+            early_stopping_rounds=50  # ✅ Mover aquí
+        )
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
@@ -598,7 +1069,7 @@ def train_xgboost_model(
     master_df: pd.DataFrame, 
     target_col: str = 'Delayed_time',
     use_optuna: bool = True,
-    n_trials: int = 50
+    n_trials: int = 5
 ) -> Dict:
     """
     Entrena un modelo XGBoost Regressor para predecir el target.
@@ -699,7 +1170,10 @@ def train_xgboost_model(
     logger.info("")
     logger.info("   🚀 Entrenando modelo final con mejores hiperparámetros...")
     
-    model = xgb.XGBRegressor(**best_params)
+    model = xgb.XGBRegressor(
+        **best_params,
+        early_stopping_rounds=50
+    )
     
     # Entrenar con train + validation
     X_train_full = pd.concat([X_train, X_val])
@@ -1014,7 +1488,6 @@ def save_master_table(master_df: pd.DataFrame, datasets: Dict[str, pd.DataFrame]
         }
     }
 
-
 @flow(name="Silver → Gold (Master Table + Features)", log_prints=True)
 def silver_to_gold():
     """
@@ -1031,45 +1504,43 @@ def silver_to_gold():
     
     # 2. Construir master table base
     master_df = build_master_table(datasets)
+
+    # 2.4. AGREGAR DISTANCIAS GEOGRÁFICAS ✅ NUEVO
+    if 'geolocation' in datasets and not datasets['geolocation'].empty:
+        master_df = add_geographic_distance_features(master_df, datasets['geolocation'])
     
     # 2.5. Aplicar One-Hot Encoding
     master_df = apply_one_hot_encoding(master_df)
 
-    @task(log_prints=True)
-    def remove_low_variance_features(master_df: pd.DataFrame, variance_threshold: float = 0.01) -> pd.DataFrame:
-        """
-        Elimina features con varianza muy baja (casi constantes).
-        """
-        logger = get_run_logger()
-        logger.info(f"🧹 Eliminando features con varianza < {variance_threshold}...")
-        
-        numeric_cols = master_df.select_dtypes(include=[np.number]).columns
-        feature_cols = [col for col in numeric_cols 
-                    if col != 'Delayed_time' and 'id' not in col.lower()]
-        
-        low_variance_cols = []
-        for col in feature_cols:
-            if master_df[col].std() < variance_threshold:
-                low_variance_cols.append(col)
-        
-        if low_variance_cols:
-            logger.info(f"   • Features eliminadas: {len(low_variance_cols)}")
-            master_df = master_df.drop(columns=low_variance_cols)
-        else:
-            logger.info(f"   • No se encontraron features con baja varianza")
-        
-        return master_df
+    # 2.5.0.5. AGREGAR FEATURES HISTÓRICAS ✅ NUEVO
+    master_df = create_historical_features(master_df)
 
-    # Luego en el flujo, ANTES de feature_selection:
-    master_df = remove_low_variance_features(master_df, variance_threshold=0.01)
+    # 2.5.0.6. AGREGAR FEATURES ROLLING ✅ NUEVO
+    master_df = create_temporal_rolling_features(master_df)
+
     
+    # 2.5.1. Transformar target si es necesario ✅ AGREGAR
+    master_df, target_transform = transform_target_if_needed(master_df, target_col='Delayed_time')
+
+    # 2.5.2. Eliminar features con baja varianza
+    master_df = remove_low_variance_features(master_df, variance_threshold=0.01)
+
     # 2.6. Feature Selection (reducir variables)
     master_df = feature_selection(
         master_df, 
         target_col='Delayed_time',
-        correlation_threshold=0.005,
-        top_n_features=80
+        correlation_threshold=0.003,
+        top_n_features=120
     )
+
+    # 2.6.1. Crear features de interacción ✅ AGREGAR
+    master_df = create_interaction_features(master_df, top_n=10)
+
+    # 2.6.2. Crear features polinomiales ✅ AGREGAR
+    master_df = create_polynomial_features(master_df, top_n=5, degree=3)
+
+    # 2.6.3. Escalar features ✅ AGREGAR
+    master_df = scale_features(master_df, target_col='Delayed_time')
 
     logger.info(f"📊 Features seleccionadas: {[col for col in master_df.columns if col not in ['order_id', 'Delayed_time']]}")
     logger.info(f"📊 Total features numéricas: {len([col for col in master_df.select_dtypes(include=[np.number]).columns if col != 'Delayed_time'])}")
@@ -1304,6 +1775,48 @@ def silver_to_gold():
     )
     logger.info(f"   ✅ Tabla 'gold.dm.features' creada")
     logger.info(f"   📊 {len(features_df):,} registros, {len(features_df.columns)} columnas")
+    
+    # ============================================================
+    # GENERAR VISUALIZACIONES
+    # ============================================================
+    viz_paths = generate_all_visualizations(
+        master_df=master_df,
+        model=xgb_result['model'],
+        feature_cols=xgb_result['feature_cols'],
+        model_metrics=model_metrics,
+        cv_results=cv_results
+    )
+
+    # ============================================================
+    # BACKTESTING CON DATASET DE ÚLTIMOS 3 MESES ✅ NUEVO
+    # ============================================================
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("🔄 BACKTESTING CON DATASET DE ÚLTIMOS 3 MESES")
+    logger.info("=" * 80)
+
+    from backtesting import generate_backtest_report
+
+    try:
+        backtest_report = generate_backtest_report(
+            model=xgb_result['model'],
+            master_df=master_df,
+            feature_cols=xgb_result['feature_cols'],
+            train_metrics=model_metrics
+        )
+        
+        if backtest_report:
+            logger.info("")
+            logger.info("📊 RESUMEN BACKTESTING (ÚLTIMOS 3 MESES):")
+            logger.info(f"   • MAE:        {backtest_report['metrics']['mae']:.2f} días")
+            logger.info(f"   • RMSE:       {backtest_report['metrics']['rmse']:.2f} días")
+            logger.info(f"   • R²:         {backtest_report['metrics']['r2']:.4f}")
+            logger.info(f"   • MAPE:       {backtest_report['metrics']['mape']:.2f}%")
+            logger.info(f"   • Median AE:  {backtest_report['metrics']['median_ae']:.2f} días")
+            logger.info("=" * 80)
+    except Exception as e:
+        logger.error(f"   ❌ Error en backtesting: {str(e)}")
+        logger.warning("   ⚠️  Continuando sin backtesting...")
     
     # ============================================================
     # RESUMEN FINAL
