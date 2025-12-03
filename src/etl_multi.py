@@ -20,8 +20,8 @@ load_dotenv("/workspace/.env")
 # Configuración
 DATA_DIR = Path("/workspace/data")
 TABLE_MAPPING = {
-    "olist_orders_last_3_months.csv": "orders",
-    #"olist_orders_rest.csv": "orders",
+    #"olist_orders_last_3_months.csv": "orders",
+    "olist_orders_rest.csv": "orders",
     "olist_customers_dataset.csv": "customers",
     "olist_order_items_dataset.csv": "order_items",
     "olist_products_dataset.csv": "products",

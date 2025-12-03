@@ -165,14 +165,17 @@ def compare_models(
     logger.info("")
     
     # Definir modelos a comparar
+        # Definir modelos a comparar (AMPLIADO)
     models = {
         'Linear Regression': LinearRegression(),
         'Ridge Regression': Ridge(alpha=1.0, random_state=random_state),
         'Lasso Regression': Lasso(alpha=1.0, random_state=random_state),
         'XGBoost': xgb.XGBRegressor(
-            n_estimators=100,
-            max_depth=6,
+            n_estimators=200,  # Aumentado de 100 a 200
+            max_depth=8,  # Aumentado de 6 a 8
             learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
             random_state=random_state,
             n_jobs=-1,
             verbosity=0

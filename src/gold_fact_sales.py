@@ -238,8 +238,8 @@ def build_master_table(datasets: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         
         # Filtrar rango válido: -10 a +20 días
         master = master[
-            (master['Delayed_time'] >= -30) & 
-            (master['Delayed_time'] <= 60)
+            (master['Delayed_time'] >= -5) & 
+            (master['Delayed_time'] <= 20)
         ].copy()
         
         removed = initial_count - len(master)
@@ -526,17 +526,18 @@ def optimize_xgboost_hyperparameters(
     
     def objective(trial):
         """Función objetivo para Optuna."""
-        # Definir espacio de búsqueda de hiperparámetros
         params = {
-            'n_estimators': trial.suggest_int('n_estimators', 50, 300),
-            'max_depth': trial.suggest_int('max_depth', 3, 10),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'n_estimators': trial.suggest_int('n_estimators', 300, 800),  # ✅ Más árboles
+            'max_depth': trial.suggest_int('max_depth', 6, 20),  # ✅ Más profundidad
+            'learning_rate': trial.suggest_float('learning_rate', 0.003, 0.2, log=True),  # ✅ LR más bajo
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),  # ✅ Más variación
             'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-            'gamma': trial.suggest_float('gamma', 0.0, 0.5),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.6, 1.0),
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),  # ✅ Ampliado
+            'gamma': trial.suggest_float('gamma', 0.0, 2.0),  # ✅ Ampliado
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 5.0),  # ✅ Más regularización L1
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 5.0),  # ✅ Más regularización L2
+            'max_delta_step': trial.suggest_int('max_delta_step', 0, 5),  # ✅ NUEVO parámetro
             'random_state': 42,
             'n_jobs': -1,
             'verbosity': 0
@@ -553,14 +554,14 @@ def optimize_xgboost_hyperparameters(
         # Predecir en validación
         y_pred = model.predict(X_val)
         
-        # Calcular MAE (métrica a minimizar)
-        mae = mean_absolute_error(y_val, y_pred)
+        # Calcular R² (métrica a MAXIMIZAR)
+        r2 = r2_score(y_val, y_pred)
         
-        return mae
+        return -r2  # ✅ Negativo porque Optuna minimiza
     
     # Crear estudio de Optuna
     study = optuna.create_study(
-        direction='minimize',  # Minimizar MAE
+        direction='minimize',  # Minimizar -R² (= maximizar R²)
         sampler=TPESampler(seed=42),
         study_name='xgboost_optimization'
     )
@@ -1033,14 +1034,121 @@ def silver_to_gold():
     
     # 2.5. Aplicar One-Hot Encoding
     master_df = apply_one_hot_encoding(master_df)
+
+    @task(log_prints=True)
+    def remove_low_variance_features(master_df: pd.DataFrame, variance_threshold: float = 0.01) -> pd.DataFrame:
+        """
+        Elimina features con varianza muy baja (casi constantes).
+        """
+        logger = get_run_logger()
+        logger.info(f"🧹 Eliminando features con varianza < {variance_threshold}...")
+        
+        numeric_cols = master_df.select_dtypes(include=[np.number]).columns
+        feature_cols = [col for col in numeric_cols 
+                    if col != 'Delayed_time' and 'id' not in col.lower()]
+        
+        low_variance_cols = []
+        for col in feature_cols:
+            if master_df[col].std() < variance_threshold:
+                low_variance_cols.append(col)
+        
+        if low_variance_cols:
+            logger.info(f"   • Features eliminadas: {len(low_variance_cols)}")
+            master_df = master_df.drop(columns=low_variance_cols)
+        else:
+            logger.info(f"   • No se encontraron features con baja varianza")
+        
+        return master_df
+
+    # Luego en el flujo, ANTES de feature_selection:
+    master_df = remove_low_variance_features(master_df, variance_threshold=0.01)
     
-        # 2.6. Feature Selection (reducir variables)
+    # 2.6. Feature Selection (reducir variables)
     master_df = feature_selection(
         master_df, 
         target_col='Delayed_time',
-        correlation_threshold=0.05,
-        top_n_features=50
+        correlation_threshold=0.005,
+        top_n_features=80
     )
+
+    logger.info(f"📊 Features seleccionadas: {[col for col in master_df.columns if col not in ['order_id', 'Delayed_time']]}")
+    logger.info(f"📊 Total features numéricas: {len([col for col in master_df.select_dtypes(include=[np.number]).columns if col != 'Delayed_time'])}")
+
+    # Después de las líneas de logging de features (línea 1047)
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("🔍 DIAGNÓSTICO DETALLADO DE DATOS")
+    logger.info("=" * 80)
+
+    # 1. Información básica
+    logger.info(f"📊 DATOS GENERALES:")
+    logger.info(f"   • Registros totales: {len(master_df):,}")
+    logger.info(f"   • Features numéricas: {len([col for col in master_df.select_dtypes(include=[np.number]).columns if col != 'Delayed_time'])}")
+
+    # 2. Análisis del Target
+    logger.info(f"")
+    logger.info(f"🎯 ANÁLISIS DEL TARGET (Delayed_time):")
+    logger.info(f"   • Media: {master_df['Delayed_time'].mean():.2f} días")
+    logger.info(f"   • Mediana: {master_df['Delayed_time'].median():.2f} días")
+    logger.info(f"   • Desviación estándar: {master_df['Delayed_time'].std():.2f} días")
+    logger.info(f"   • Rango: [{master_df['Delayed_time'].min():.0f}, {master_df['Delayed_time'].max():.0f}] días")
+    logger.info(f"   • Skewness: {master_df['Delayed_time'].skew():.2f}")
+    logger.info(f"   • Valores nulos: {master_df['Delayed_time'].isna().sum()}")
+
+    # 3. Distribución del target
+    percentiles = master_df['Delayed_time'].quantile([0.25, 0.5, 0.75, 0.9, 0.95])
+    logger.info(f"   • Percentiles:")
+    logger.info(f"      - 25%: {percentiles[0.25]:.1f} días")
+    logger.info(f"      - 50%: {percentiles[0.50]:.1f} días")
+    logger.info(f"      - 75%: {percentiles[0.75]:.1f} días")
+    logger.info(f"      - 90%: {percentiles[0.90]:.1f} días")
+    logger.info(f"      - 95%: {percentiles[0.95]:.1f} días")
+
+    # 4. Varianza de las features
+    logger.info(f"")
+    logger.info(f"📈 ANÁLISIS DE FEATURES:")
+    numeric_cols = [col for col in master_df.select_dtypes(include=[np.number]).columns 
+                    if col != 'Delayed_time' and 'id' not in col.lower()]
+
+    # Features con baja varianza (casi constantes)
+    low_variance_features = []
+    for col in numeric_cols:
+        std = master_df[col].std()
+        if std < 0.01:
+            low_variance_features.append(col)
+
+    if low_variance_features:
+        logger.warning(f"   ⚠️  Features con baja varianza (<0.01): {len(low_variance_features)}")
+        logger.warning(f"      {low_variance_features[:5]}")  # Mostrar primeras 5
+
+    # Features con alta correlación con el target
+    logger.info(f"")
+    logger.info(f"🔗 TOP 10 FEATURES CON MAYOR CORRELACIÓN CON TARGET:")
+    correlations = {}
+    for col in numeric_cols:
+        corr = abs(master_df[col].corr(master_df['Delayed_time']))
+        if not np.isnan(corr):
+            correlations[col] = corr
+
+    top_corr = sorted(correlations.items(), key=lambda x: x[1], reverse=True)[:10]
+    for i, (feat, corr) in enumerate(top_corr, 1):
+        logger.info(f"   {i}. {feat}: {corr:.4f}")
+
+    # 5. Verificar valores nulos
+    logger.info(f"")
+    logger.info(f"❓ VALORES NULOS EN FEATURES:")
+    null_counts = master_df[numeric_cols].isnull().sum()
+    features_with_nulls = null_counts[null_counts > 0].sort_values(ascending=False)
+    if len(features_with_nulls) > 0:
+        logger.warning(f"   ⚠️  Features con valores nulos: {len(features_with_nulls)}")
+        for feat, count in features_with_nulls.head(5).items():
+            logger.warning(f"      • {feat}: {count:,} ({count/len(master_df)*100:.1f}%)")
+    else:
+        logger.info(f"   ✅ No hay valores nulos en las features")
+
+    logger.info("=" * 80)
+    logger.info("")
+
 
     # ============================================================
     # EVALUACIÓN CON VALIDACIÓN CRUZADA
