@@ -90,8 +90,5 @@ volumes:
   postgres_data:
   python_deps:
   prefect_data:
-<<<<<<< HEAD
   streamlit_deps:
-=======
   pgadmin_data:
->>>>>>> 5eefbc1e90b26b213ababb0c7418908cffeb543e
