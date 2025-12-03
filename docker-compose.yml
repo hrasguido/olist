@@ -64,8 +64,28 @@ services:
       - prefect_data:/root/.prefect
     depends_on:
       - dev
+  
+  streamlit:
+    image: python:3.11-slim
+    container_name: streamlit_app
+    restart: unless-stopped
+    working_dir: /app
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./streamlit_app:/app  # Monta el directorio local con tu app Streamlit (crea este directorio con tu script main.py)
+    command: bash -c "pip install --no-cache-dir -r /app/requirements.txt && streamlit run /app/main.py --server.port=8501 --server.address=0.0.0.0"
+    environment:
+      - POSTGRES_HOST=db  # Conecta a la DB interna
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   postgres_data:
   python_deps:
   prefect_data:
+  streamlit_deps:
