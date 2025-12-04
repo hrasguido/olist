@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   db:
@@ -76,6 +75,7 @@ services:
       - "8501:8501"
     volumes:
       - ./streamlit_app:/app  # Monta el directorio local con tu app Streamlit (crea este directorio con tu script main.py)
+      - ./outputs:/app/outputs
     command: bash -c "pip install --no-cache-dir -r /app/requirements.txt && streamlit run /app/main.py --server.port=8501 --server.address=0.0.0.0"
     environment:
       - POSTGRES_HOST=db  # Conecta a la DB interna
@@ -90,9 +90,5 @@ volumes:
   postgres_data:
   python_deps:
   prefect_data:
-<<<<<<< HEAD
-
-=======
-  streamlit_deps:
   pgadmin_data:
->>>>>>> 6d704e1591b91948d940160547c9469ac8fc11f6
+
