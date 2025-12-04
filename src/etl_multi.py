@@ -1,3 +1,17 @@
+# docker exec -it etl_dev bash
+#  python src/etl_multi.py
+
+
+
+
+# ---
+# prefect: http://0.0.0.0:4200/
+
+# pgadmin: http://127.0.0.1:8081/
+
+# streamlit: http://0.0.0.0:8501
+
+
 # src/etl_multi.py
 """
 Ingesta CSV → Olist → Bronze → Silver
